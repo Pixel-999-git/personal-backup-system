@@ -1,0 +1,35 @@
+# Root .gitignore for Personal Backup System
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Android / Gradle
+.gradle/
+build/
+*/build/
+app/build/
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+local.properties
+android-app/local.properties
+*.iml
+.idea/
+
+# Android Keystore & Secrets (Never commit secrets)
+*.jks
+*.keystore
+
+# Temporary and staging directories
+staging/
+temp/
+logs/
+*.log

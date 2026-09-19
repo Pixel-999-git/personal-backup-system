@@ -1,0 +1,12 @@
+{
+  "archiveDir": "C:\\Users\\super\\.gemini\\antigravity-ide\\scratch\\personal-backup-system\\windows-service\\Samsung Galaxy A05s Backup",
+  "listenHost": "0.0.0.0",
+  "listenPort": 8976,
+  "pairingCode": "BACKUP-7749",
+  "minFreeSpaceBytes": 1073741824,
+  "chunkSizeBytes": 2097152,
+  "serverToken": "22a14976-7469-4906-b46f-8c7b15e18e5f",
+  "archiveId": "c1bf6425-d498-4616-84cc-3375a34d30c1",
+  "recoveryKey": "RCV-LCAL-E57X-2ZCE-M29A",
+  "recoveryKeyHash": "d5b6fb410f370e486678bebe74ecc7306703225df7326f23d799e06b6f502569"
+}

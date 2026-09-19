@@ -1,0 +1,48 @@
+====================================================
+  RUNNING END-TO-END ACCEPTANCE & RED-TEAM TESTS    
+====================================================
+[Server] Windows Backup Service listening at http://127.0.0.1:9999
+
+--- 1. Health & Storage Check ---
+  [PASS] Health endpoint responds 200
+  [PASS] Service status is RUNNING
+  [PASS] Service reports healthy
+
+--- 2. Device Pairing & Auth Token ---
+  [PASS] Invalid pairing code rejected with 403
+[Auth] Device successfully paired: Samsung Galaxy A05s (dev1)
+  [PASS] Valid pairing code accepted with 200
+  [PASS] Issued bearer auth token
+
+--- 3. Red Team: Security & Unauthorized Access ---
+  [PASS] Bogus auth token rejected with 401/403
+
+--- 4. Resumable Upload & Network Interruption Simulation ---
+  [PASS] Upload session initialized
+  [PASS] Chunk 1 (50%) written successfully
+[Upload] Resuming session 1d702bb9-df8a-44a9-8fe9-4fe88d359871 for birthday_video.mp4 at 131072 bytes
+  [PASS] Server returned existing session ID on reconnect
+  [PASS] Server remembered exact received byte offset (131072 bytes)
+  [PASS] Chunk 2 written successfully after resume
+  [PASS] Upload completed all bytes
+[Upload] Finalized & verified: birthday_video.mp4 -> media\9e\9e49c6fe1ac0990946f61050e5853a4e98daaf2d265ff59d27dd5a27063810c1.mp4
+  [PASS] Finalize verified SHA-256 and committed atomically
+
+--- 5. Red Team: Data Tamper & Quarantine Defense ---
+  [PASS] Server rejected tampered file with 422 Unprocessable Entity
+  [PASS] Tampered file quarantined to quarantine/ directory
+
+--- 6. Deduplication Test ---
+  [PASS] Detected duplicate content hash
+  [PASS] Server confirmed zero-byte transfer required
+
+--- 7. Manual File Upload (SAF / Documents) ---
+[Upload] Finalized & verified: contract.pdf -> files\5c\5ce0e5e14d97999bc7a09792d02e8a623ae87b75e962c944d46aab877a2435f8_contract.pdf
+  [PASS] Manual PDF file verified and archived to files/ directory
+
+--- 8. Daily Reconciliation Manifest ---
+  [PASS] Reconciliation returned all verified archive records (3 found)
+
+====================================================
+  E2E TEST RESULTS: 20 PASSED, 0 FAILED
+====================================================

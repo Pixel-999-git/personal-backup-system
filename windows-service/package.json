@@ -1,0 +1,20 @@
+{
+  "name": "windows-backup-service",
+  "version": "1.0.0",
+  "description": "Personal Android to Windows Resumable Backup Service & Archive",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js run",
+    "test": "node --test tests/*.test.js",
+    "verify": "node src/main.js verify"
+  },
+  "keywords": [
+    "android",
+    "windows",
+    "backup",
+    "archive",
+    "resumable"
+  ],
+  "author": "Antigravity Lead Engineer",
+  "license": "ISC"
+}
