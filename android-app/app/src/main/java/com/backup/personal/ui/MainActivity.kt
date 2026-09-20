@@ -364,9 +364,16 @@ class MainActivity : ComponentActivity() {
                                     color = AppPalette.TextSub
                                 )
                             }
+                            val displayNotes = info.releaseNotes
+                                .lines()
+                                .map { it.trim().replace(Regex("^#+\\s*"), "").replace(Regex("^[-*]\\s*"), "• ") }
+                                .filter { it.isNotBlank() }
+                                .joinToString("\n")
+                                .take(250)
                             Text(
-                                text = info.releaseNotes.take(120),
+                                text = displayNotes,
                                 fontSize = 12.sp,
+                                lineHeight = 16.sp,
                                 color = AppPalette.TextSub
                             )
                             if (isDownloadingUpdate) {

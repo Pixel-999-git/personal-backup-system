@@ -60,7 +60,8 @@ class AppUpdater(private val context: Context) {
                 val bodyStr = response.body?.string() ?: ""
                 val json = JSONObject(bodyStr)
                 val tagName = json.optString("tag_name", "").removePrefix("v")
-                val releaseNotes = json.optString("body", "Bug fixes and improvements")
+                val rawNotes = json.optString("body", "Bug fixes and improvements")
+                val cleanNotes = cleanMarkdown(rawNotes)
                 val assets = json.optJSONArray("assets")
 
                 var downloadUrl: String? = null
@@ -81,7 +82,7 @@ class AppUpdater(private val context: Context) {
                     hasUpdate = isNewer && downloadUrl != null,
                     latestVersion = if (tagName.isNotEmpty()) tagName else BuildConfig.VERSION_NAME,
                     currentVersion = BuildConfig.VERSION_NAME,
-                    releaseNotes = releaseNotes,
+                    releaseNotes = cleanNotes,
                     apkDownloadUrl = downloadUrl,
                     expectedSha256 = expectedSha256
                 )
@@ -172,5 +173,16 @@ class AppUpdater(private val context: Context) {
             if (rVal < lVal) return false
         }
         return false
+    }
+
+    private fun cleanMarkdown(text: String): String {
+        return text.lines()
+            .map { line ->
+                line.trim()
+                    .replace(Regex("^#+\\s*"), "") // Strip leading markdown headers like ### or ##
+                    .replace(Regex("^[-*]\\s*"), "• ") // Convert markdown bullets - or * to clean dots •
+            }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
     }
 }

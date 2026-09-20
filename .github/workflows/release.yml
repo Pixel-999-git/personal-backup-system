@@ -44,8 +44,14 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'personalbackup' }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'personalbackup123' }}
         run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "master" ] || [ "$TAG_NAME" = "main" ]; then
+            TAG_NAME="${{ github.event.inputs.version || 'v1.0.3' }}"
+          fi
+          CLEAN_VER="${TAG_NAME#v}"
+          echo "Building APK for version $CLEAN_VER (run number ${{ github.run_number }})"
           cd android-app
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease -PappVersionName="$CLEAN_VER" -PappVersionCode="${{ github.run_number }}" --no-daemon
 
       - name: Prepare Release Artifacts
         run: |

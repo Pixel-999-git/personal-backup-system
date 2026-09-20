@@ -11,8 +11,10 @@ android {
         applicationId = "com.backup.personal"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        val verCode = (project.findProperty("appVersionCode") as? String)?.toIntOrNull() ?: 3
+        val verName = (project.findProperty("appVersionName") as? String) ?: "1.0.3"
+        versionCode = verCode
+        versionName = verName
     }
 
     signingConfigs {
