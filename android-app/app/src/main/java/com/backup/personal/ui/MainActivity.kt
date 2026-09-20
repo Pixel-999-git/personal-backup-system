@@ -1258,7 +1258,7 @@ class MainActivity : ComponentActivity() {
                                 Text("${r.trashedItemsFound} items", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (r.trashedItemsFound > 0) AppPalette.MintHero else AppPalette.TextMuted)
                             }
 
-                            // Tier 2: Dynamic Vendor Gallery Trash (Xiaomi / Samsung / ColorOS)
+                            // Tier 2: Samsung One UI Gallery Trash
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween

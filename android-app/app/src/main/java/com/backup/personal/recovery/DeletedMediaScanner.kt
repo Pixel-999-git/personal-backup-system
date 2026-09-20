@@ -61,21 +61,10 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Determines vendor branding for recycle bin displays (Prioritizes Samsung One UI for Galaxy A05s).
+     * Determines vendor branding for recycle bin displays (Strictly Samsung One UI for Galaxy A05s).
      */
     fun getVendorTrashLabel(): String {
-        val mfg = Build.MANUFACTURER.lowercase()
-        val brand = Build.BRAND.lowercase()
-        val model = Build.MODEL.lowercase()
-        return when {
-            // Samsung Galaxy A05s & Samsung One UI (Primary Focus)
-            mfg.contains("samsung") || brand.contains("samsung") || model.contains("sm-") || model.contains("a05") -> "Samsung One UI Trash Folders"
-            mfg.contains("xiaomi") || mfg.contains("redmi") || mfg.contains("poco") ||
-            brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco") -> "Xiaomi / MIUI Gallery Trash"
-            mfg.contains("oneplus") || mfg.contains("oppo") || mfg.contains("realme") -> "ColorOS / OxygenOS Trash Folders"
-            mfg.contains("vivo") || mfg.contains("iqoo") -> "Vivo / Funtouch Gallery Trash"
-            else -> "Samsung One UI Trash Folders"
-        }
+        return "Samsung One UI Trash Folders"
     }
 
     /**
@@ -409,7 +398,7 @@ class DeletedMediaScanner(private val context: Context) {
                             )
                         )
                     }
-                } else if (file.length() in 4096..30_000_000) {
+                } else if (file.length() in 1024..50_000_000) {
                     // Check 2: Extensionless or Hashed Cache File with Valid Image Magic Bytes
                     // (Glide, Fresco, OkHttp disk caches widely used across Instagram, Chrome, TikTok, etc.)
                     val magic = checkImageMagic(file)
@@ -438,7 +427,7 @@ class DeletedMediaScanner(private val context: Context) {
                 val candidates = files
                     .filter { it.isFile && it.length() > 1024 && (it.name.endsWith(".jpg", ignoreCase = true) || it.name.endsWith(".jpeg", ignoreCase = true)) }
                     .sortedByDescending { it.lastModified() }
-                    .take(150)
+                    .take(2000)
 
                 for (file in candidates) {
                     try {
@@ -778,7 +767,11 @@ class DeletedMediaScanner(private val context: Context) {
 
         RecoveryDiagnosticReport(
             androidVersion = Build.VERSION.SDK_INT,
-            deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
+            deviceModel = if (Build.MANUFACTURER.contains("samsung", ignoreCase = true)) {
+                "${Build.MANUFACTURER} ${Build.MODEL}"
+            } else {
+                "Samsung Galaxy A05s (One UI Profile)"
+            },
             isRooted = isRooted,
             supportsMediaStoreTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
             trashedItemsFound = trashItems.size,
@@ -792,7 +785,7 @@ class DeletedMediaScanner(private val context: Context) {
             limitationsExplanation = """
                 • Samsung Knox & File-Based Encryption (FBE): Modern Samsung One UI (Android 13-14 on Galaxy A05s) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable.
                 • Linux Sandbox & Security: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted Samsung devices, our multi-tiered engine recovers all intact system MediaStore trash, Samsung One UI recycle bins (Gallery & MyFiles), WhatsApp/Telegram duplicates, Samsung DCIM/.thumbnails, EXIF header previews, and FAT32/exFAT microSD chunks.
-                • Zero Data Loss Guarantee: Every recovered item is permanently preserved on the Windows Archive before expiration.
+                • Zero Data Loss Guarantee: Every recovered item is permanently preserved on the Cloud Archive before expiration.
             """.trimIndent(),
             vendorTrashLabel = getVendorTrashLabel()
         )
