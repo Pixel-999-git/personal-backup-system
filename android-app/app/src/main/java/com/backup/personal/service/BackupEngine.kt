@@ -136,7 +136,13 @@ class BackupEngine(private val context: Context) {
             val tempFile = File(stagingDir, "temp_${UUID.randomUUID()}.part")
             try {
                 var computedHash: String? = null
-                context.contentResolver.openInputStream(uri)?.use { input ->
+                val openStream = if (uri.scheme == "file" && uri.path != null) {
+                    FileInputStream(File(uri.path!!))
+                } else {
+                    context.contentResolver.openInputStream(uri)
+                }
+
+                openStream?.use { input ->
                     FileOutputStream(tempFile).use { output ->
                         val digest = MessageDigest.getInstance("SHA-256")
                         val buffer = ByteArray(64 * 1024)

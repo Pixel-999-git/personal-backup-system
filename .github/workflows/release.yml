@@ -46,7 +46,7 @@ jobs:
         run: |
           TAG_NAME="${{ github.ref_name }}"
           if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "master" ] || [ "$TAG_NAME" = "main" ]; then
-            TAG_NAME="${{ github.event.inputs.version || 'v1.0.3' }}"
+            TAG_NAME="${{ github.event.inputs.version || 'v1.0.4' }}"
           fi
           CLEAN_VER="${TAG_NAME#v}"
           echo "Building APK for version $CLEAN_VER (run number ${{ github.run_number }})"
@@ -61,7 +61,7 @@ jobs:
           sha256sum personal-backup.apk > personal-backup.apk.sha256
           TAG_NAME="${{ github.ref_name }}"
           if [ -z "$TAG_NAME" ] || [ "$TAG_NAME" = "master" ] || [ "$TAG_NAME" = "main" ]; then
-            TAG_NAME="${{ github.event.inputs.version || 'v1.0.1' }}"
+            TAG_NAME="${{ github.event.inputs.version || 'v1.0.4' }}"
           fi
           echo "RELEASE_TAG=$TAG_NAME" >> $GITHUB_ENV
 

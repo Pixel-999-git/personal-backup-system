@@ -81,47 +81,61 @@ class BackupApiClient {
     }
 
     fun pair(host: String, port: Int, pairingCode: String, deviceId: String, deviceName: String): Pair<String?, String?> {
-        val url = NetworkTransportProvider.getTransport(host).buildUrl(host, port, "/api/v1/auth/pair")
-        val payload = JSONObject().apply {
-            put("pairingCode", pairingCode)
-            put("deviceId", deviceId)
-            put("deviceName", deviceName)
-        }
-        val body = payload.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(url).post(body).build()
+        return try {
+            val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
+            val cleanPort = if (port in 1..65535) port else 8976
+            val cleanCode = pairingCode.trim()
+            val url = NetworkTransportProvider.getTransport(cleanHost).buildUrl(cleanHost, cleanPort, "/api/v1/auth/pair")
+            val payload = JSONObject().apply {
+                put("pairingCode", cleanCode)
+                put("deviceId", deviceId)
+                put("deviceName", deviceName)
+            }
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url(url).post(body).build()
 
-        client.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                val json = JSONObject(response.body?.string() ?: "{}")
-                if (json.optBoolean("success", false)) {
-                    val token = if (json.has("authToken")) json.getString("authToken") else null
-                    val recoveryKey = if (json.has("recoveryKey")) json.getString("recoveryKey") else null
-                    return Pair(token, recoveryKey)
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val json = JSONObject(response.body?.string() ?: "{}")
+                    if (json.optBoolean("success", false)) {
+                        val token = if (json.has("authToken")) json.getString("authToken") else null
+                        val recoveryKey = if (json.has("recoveryKey")) json.getString("recoveryKey") else null
+                        return Pair(token, recoveryKey)
+                    }
                 }
             }
+            Pair(null, null)
+        } catch (_: Exception) {
+            Pair(null, null)
         }
-        return Pair(null, null)
     }
 
     fun recover(host: String, port: Int, recoveryKey: String, deviceId: String, deviceName: String): String? {
-        val url = NetworkTransportProvider.getTransport(host).buildUrl(host, port, "/api/v1/auth/recover")
-        val payload = JSONObject().apply {
-            put("recoveryKey", recoveryKey)
-            put("deviceId", deviceId)
-            put("deviceName", deviceName)
-        }
-        val body = payload.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(url).post(body).build()
+        return try {
+            val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
+            val cleanPort = if (port in 1..65535) port else 8976
+            val cleanKey = recoveryKey.trim()
+            val url = NetworkTransportProvider.getTransport(cleanHost).buildUrl(cleanHost, cleanPort, "/api/v1/auth/recover")
+            val payload = JSONObject().apply {
+                put("recoveryKey", cleanKey)
+                put("deviceId", deviceId)
+                put("deviceName", deviceName)
+            }
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url(url).post(body).build()
 
-        client.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                val json = JSONObject(response.body?.string() ?: "{}")
-                if (json.optBoolean("success", false)) {
-                    return if (json.has("authToken")) json.getString("authToken") else null
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val json = JSONObject(response.body?.string() ?: "{}")
+                    if (json.optBoolean("success", false)) {
+                        return if (json.has("authToken")) json.getString("authToken") else null
+                    }
                 }
             }
+            null
+        } catch (_: Exception) {
+            null
         }
-        return null
     }
 
     fun initUpload(host: String, port: Int, token: String, item: BackupItem): InitUploadResult {

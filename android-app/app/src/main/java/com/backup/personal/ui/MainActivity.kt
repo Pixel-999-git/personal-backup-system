@@ -1,11 +1,14 @@
 package com.backup.personal.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -149,6 +152,30 @@ class MainActivity : ComponentActivity() {
             permissionsLauncher.launch(ungranted.toTypedArray())
         }
         prefs.hasRequestedInitialPermissions = true
+    }
+
+    private fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    private fun requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    startActivity(intent)
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     private fun handleManualFileSelection(uri: Uri) {
@@ -843,6 +870,9 @@ class MainActivity : ComponentActivity() {
                             .background(AppPalette.CardBackground)
                             .border(1.dp, AppPalette.CardBorder, RoundedCornerShape(16.dp))
                             .clickable(enabled = !isOperating) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess()) {
+                                    requestAllFilesAccess()
+                                }
                                 showRecoveryDialog = true
                             }
                             .padding(14.dp)
@@ -958,28 +988,46 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     Button(
                         onClick = {
+                            val host = hostInput.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
+                            val port = portInput.trim().toIntOrNull() ?: 8976
+                            val code = codeInput.trim()
+
+                            if (host.isBlank()) {
+                                pairingStatus = "Please enter the server IP"
+                                return@Button
+                            }
+                            if (code.isBlank()) {
+                                pairingStatus = "Please enter the pairing code"
+                                return@Button
+                            }
+
+                            prefs.serverHost = host
+                            prefs.serverPort = port
+                            pairingStatus = "Pairing with $host:$port..."
+
                             CoroutineScope(Dispatchers.IO).launch {
-                                val port = portInput.toIntOrNull() ?: 8976
-                                prefs.serverHost = hostInput
-                                prefs.serverPort = port
-                                pairingStatus = "Pairing with $hostInput:$port..."
+                                try {
+                                    val (token, rcvKey) = apiClient.pair(
+                                        host,
+                                        port,
+                                        code,
+                                        prefs.deviceId,
+                                        prefs.deviceName
+                                    )
 
-                                val (token, rcvKey) = apiClient.pair(
-                                    hostInput,
-                                    port,
-                                    codeInput,
-                                    prefs.deviceId,
-                                    prefs.deviceName
-                                )
-
-                                withContext(Dispatchers.Main) {
-                                    if (token != null) {
-                                        prefs.authToken = token
-                                        if (rcvKey != null) generatedRecoveryKey = rcvKey
-                                        pairingStatus = "Paired successfully!"
-                                        Toast.makeText(this@MainActivity, "Device paired!", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        pairingStatus = "Pairing failed. Check IP & code."
+                                    withContext(Dispatchers.Main) {
+                                        if (token != null) {
+                                            prefs.authToken = token
+                                            if (rcvKey != null) generatedRecoveryKey = rcvKey
+                                            pairingStatus = "Paired successfully!"
+                                            Toast.makeText(this@MainActivity, "Device paired!", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            pairingStatus = "Pairing failed. Check IP ($host:$port) & code."
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        pairingStatus = "Connection error: ${e.localizedMessage ?: e.message}"
                                     }
                                 }
                             }
@@ -1046,27 +1094,41 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     Button(
                         onClick = {
+                            val host = hostInput.trim().removePrefix("http://").removePrefix("https://").trimEnd('/')
+                            val port = portInput.trim().toIntOrNull() ?: 8976
+                            val key = recoveryKeyInput.trim()
+
+                            if (host.isBlank() || key.isBlank()) {
+                                recoveryStatus = "Please enter server IP and recovery key"
+                                return@Button
+                            }
+
+                            prefs.serverHost = host
+                            prefs.serverPort = port
+                            recoveryStatus = "Authorizing replacement device..."
+
                             CoroutineScope(Dispatchers.IO).launch {
-                                val port = portInput.toIntOrNull() ?: 8976
-                                prefs.serverHost = hostInput
-                                prefs.serverPort = port
-                                recoveryStatus = "Authorizing replacement device..."
+                                try {
+                                    val token = apiClient.recover(
+                                        host,
+                                        port,
+                                        key,
+                                        prefs.deviceId,
+                                        "Replacement Samsung Galaxy A05s"
+                                    )
 
-                                val token = apiClient.recover(
-                                    hostInput,
-                                    port,
-                                    recoveryKeyInput,
-                                    prefs.deviceId,
-                                    "Replacement Samsung Galaxy A05s"
-                                )
-
-                                withContext(Dispatchers.Main) {
-                                    if (token != null) {
-                                        prefs.authToken = token
-                                        recoveryStatus = "Authorized successfully! You can now tap 'Restore Archive to This Device'."
-                                        Toast.makeText(this@MainActivity, "Replacement Phone Authorized!", Toast.LENGTH_LONG).show()
-                                    } else {
-                                        recoveryStatus = "Authorization failed. Check IP & Recovery Key."
+                                    withContext(Dispatchers.Main) {
+                                        if (token != null) {
+                                            prefs.authToken = token
+                                            recoveryStatus = "Authorized successfully! You can now tap 'Restore Archive to This Device'."
+                                            Toast.makeText(this@MainActivity, "Replacement Phone Authorized!", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            recoveryStatus = "Authorization failed. Check IP & Recovery Key."
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    withContext(Dispatchers.Main) {
+                                        recoveryStatus = "Error: ${e.localizedMessage ?: e.message}"
                                     }
                                 }
                             }
@@ -1208,7 +1270,7 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("• Thumbnails & EXIF Previews", fontSize = 12.sp, color = AppPalette.TextSub)
+                                Text("• Thumbnails & Cache Remnants", fontSize = 12.sp, color = AppPalette.TextSub)
                                 Text("${r.thumbnailRemnantsFound} previews", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (r.thumbnailRemnantsFound > 0) AppPalette.MintHero else AppPalette.TextMuted)
                             }
 
@@ -1223,6 +1285,23 @@ class MainActivity : ComponentActivity() {
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (r.removableStorageRemnantsFound > 0) AppPalette.MintHero else AppPalette.TextMuted
+                                )
+                            }
+
+                            // Deep Storage Status
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { if (!hasAllFilesAccess()) requestAllFilesAccess() },
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("• All Files Access (Deep Scan)", fontSize = 12.sp, color = if (hasAllFilesAccess()) AppPalette.TextSub else AppPalette.BlushText)
+                                Text(
+                                    text = if (hasAllFilesAccess()) "Active" else "Tap to Grant ›",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (hasAllFilesAccess()) AppPalette.MintHero else AppPalette.BlushText
                                 )
                             }
 

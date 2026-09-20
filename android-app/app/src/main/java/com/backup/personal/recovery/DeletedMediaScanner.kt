@@ -60,26 +60,28 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Dry-run analysis: Discovers all recoverable items across the 5 forensic sources
+     * Dry-run analysis: Discovers all recoverable items across forensic sources
      * without modifying the database or creating persistent staging copies.
      */
-    suspend fun analyzeRecoverableMedia(): List<DiscoveredRecoveryItem> = withContext(Dispatchers.IO) {
+    suspend fun analyzeRecoverableMedia(doCarve: Boolean = false): List<DiscoveredRecoveryItem> = withContext(Dispatchers.IO) {
         val discovered = mutableListOf<DiscoveredRecoveryItem>()
         discovered.addAll(discoverMediaStoreTrash())
         discovered.addAll(discoverVendorTrashFolders())
         discovered.addAll(discoverSocialAndAppMediaCaches())
-        discovered.addAll(discoverThumbnailAndExifRemnants())
+        discovered.addAll(discoverThumbnailAndExifRemnants(doCarve))
         discovered.addAll(discoverRemovableStorageRemnants())
         discovered
     }
 
     /**
-     * Executes the recovery pipeline: analyzes all sources and stages every discovered item
-     * into the durable pending backup queue with clear provenance tagging.
+     * Executes the recovery pipeline: analyzes all sources, carves thumbnail databases,
+     * and stages every discovered item into the durable pending backup queue.
      */
     suspend fun scanAndQueueRecoverableMedia(): Int = withContext(Dispatchers.IO) {
-        val items = analyzeRecoverableMedia()
+        val items = analyzeRecoverableMedia(doCarve = true)
         var stagedCount = 0
+        val tempFilesToClean = mutableListOf<File>()
+
         for (item in items) {
             val success = engine.stageManualFile(
                 uri = item.uri,
@@ -90,16 +92,21 @@ class DeletedMediaScanner(private val context: Context) {
             )
             if (success) stagedCount++
 
-            // Clean up temporary extracted EXIF files from cacheDir after staging is secure
             if (item.uri.scheme == "file") {
                 item.uri.path?.let { path ->
-                    val tempFile = File(path)
-                    if (tempFile.exists() && tempFile.parentFile == context.cacheDir) {
-                        tempFile.delete()
+                    val file = File(path)
+                    if (file.exists() && (file.parentFile == context.cacheDir || file.parentFile?.name == "carved_thumbnails")) {
+                        tempFilesToClean.add(file)
                     }
                 }
             }
         }
+
+        // Clean up temporary extracted previews after durable staging
+        for (f in tempFilesToClean) {
+            try { f.delete() } catch (_: Exception) {}
+        }
+
         stagedCount
     }
 
@@ -160,7 +167,7 @@ class DeletedMediaScanner(private val context: Context) {
                     }
                 }
             } catch (_: Exception) {
-                // Device ContentProvider may restrict IS_TRASHED queries
+                // Scoped storage check
             }
         }
         return results
@@ -168,7 +175,6 @@ class DeletedMediaScanner(private val context: Context) {
 
     /**
      * Tier 2: Vendor / Samsung Gallery Trash Directories
-     * Scans One UI hidden trash directories in DCIM, Pictures, and MyFiles recycle bins.
      */
     private fun discoverVendorTrashFolders(): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
@@ -185,7 +191,7 @@ class DeletedMediaScanner(private val context: Context) {
 
         for (dir in candidateDirs) {
             if (dir.exists() && dir.isDirectory) {
-                scanDirectoryRecursively(dir, maxDepth = 3) { file ->
+                scanDirectoryRecursively(dir, maxDepth = 4) { file ->
                     if (file.isFile && file.length() > 2048 && isMediaFile(file.name)) {
                         results.add(
                             DiscoveredRecoveryItem(
@@ -205,9 +211,7 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Tier 3: Social & App Media Caches (Intact Surviving Copies)
-     * When users delete a photo/video from Camera/DCIM, an intact original or received copy
-     * frequently survives in WhatsApp, Telegram, or Screenshots.
+     * Tier 3: Social & App Media Caches (Intact Surviving Copies & Hidden .nomedia)
      */
     private fun discoverSocialAndAppMediaCaches(): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
@@ -216,27 +220,37 @@ class DeletedMediaScanner(private val context: Context) {
         val candidateDirs = listOf(
             File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
             File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Sent"),
+            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
             File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video"),
             File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/Sent"),
+            File(baseExternal, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images"),
+            File(baseExternal, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Video"),
             File(baseExternal, "WhatsApp/Media/WhatsApp Images"),
             File(baseExternal, "WhatsApp/Media/WhatsApp Video"),
             File(baseExternal, "Android/media/org.telegram.messenger/Telegram/Telegram Images"),
+            File(baseExternal, "Android/media/org.telegram.messenger/Telegram/Telegram Video"),
             File(baseExternal, "Movies/Telegram"),
             File(baseExternal, "Pictures/Telegram"),
             File(baseExternal, "Pictures/Screenshots"),
+            File(baseExternal, "Pictures/Facebook"),
+            File(baseExternal, "Pictures/Instagram"),
+            File(baseExternal, "Pictures/Twitter"),
+            File(baseExternal, "Pictures/Reddit"),
+            File(baseExternal, "DCIM/Facebook"),
             File(baseExternal, "Download")
         )
 
         for (dir in candidateDirs) {
             if (dir.exists() && dir.isDirectory) {
-                val files = dir.listFiles() ?: continue
-                for (file in files) {
-                    if (file.isFile && file.length() > 15 * 1024 && isMediaFile(file.name)) {
+                scanDirectoryRecursively(dir, maxDepth = 2) { file ->
+                    if (file.isFile && file.length() > 8 * 1024 && isMediaFile(file.name)) {
                         val appName = when {
                             file.absolutePath.contains("whatsapp", ignoreCase = true) -> "WhatsApp"
                             file.absolutePath.contains("telegram", ignoreCase = true) -> "Telegram"
                             file.absolutePath.contains("screenshot", ignoreCase = true) -> "Screenshots"
-                            else -> "Downloads"
+                            file.absolutePath.contains("facebook", ignoreCase = true) -> "Facebook"
+                            file.absolutePath.contains("instagram", ignoreCase = true) -> "Instagram"
+                            else -> "App Media"
                         }
                         results.add(
                             DiscoveredRecoveryItem(
@@ -257,44 +271,84 @@ class DeletedMediaScanner(private val context: Context) {
 
     /**
      * Tier 4: Thumbnail & Embedded EXIF Remnants
-     * Recovers persistent previews from /DCIM/.thumbnails and carves embedded JPEG previews
-     * from partial or damaged photos via ExifInterface.
+     * Recovers previews from all .thumbnails folders, carves Android .thumbdata databases,
+     * and extracts embedded EXIF previews from photos.
      */
-    private fun discoverThumbnailAndExifRemnants(): List<DiscoveredRecoveryItem> {
+    private fun discoverThumbnailAndExifRemnants(doCarve: Boolean = false): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
         val baseExternal = Environment.getExternalStorageDirectory() ?: return results
 
-        // 1. /DCIM/.thumbnails
-        val dcimDir = File(baseExternal, Environment.DIRECTORY_DCIM)
-        val thumbDir = File(dcimDir, ".thumbnails")
-        if (thumbDir.exists() && thumbDir.isDirectory) {
-            val files = thumbDir.listFiles() ?: emptyArray()
-            for (file in files) {
-                if (file.isFile && file.length() > 4096) {
-                    results.add(
-                        DiscoveredRecoveryItem(
-                            uri = Uri.fromFile(file),
-                            displayName = "[RECOVERED_THUMBNAIL] ${file.name}",
-                            sizeBytes = file.length(),
-                            mimeType = "image/jpeg",
-                            provenance = PROVENANCE_THUMBNAIL,
-                            sourceDescription = "Thumbnail Cache Remnant (.thumbnails)"
-                        )
-                    )
+        val thumbCandidateDirs = listOf(
+            File(baseExternal, "DCIM/.thumbnails"),
+            File(baseExternal, "Pictures/.thumbnails"),
+            File(baseExternal, "Movies/.thumbnails"),
+            File(baseExternal, ".thumbnails"),
+            File(baseExternal, "Android/media/.thumbnails")
+        )
+
+        for (thumbDir in thumbCandidateDirs) {
+            if (thumbDir.exists() && thumbDir.isDirectory) {
+                val files = thumbDir.listFiles() ?: emptyArray()
+                for (file in files) {
+                    if (file.isFile) {
+                        if (file.name.startsWith(".thumbdata")) {
+                            if (doCarve) {
+                                // Extract actual JPEG files during queueing
+                                val carved = carveJpegsFromThumbdataFile(file)
+                                for (carvedFile in carved) {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(carvedFile),
+                                            displayName = "[RECOVERED_THUMBNAIL] ${carvedFile.name}",
+                                            sizeBytes = carvedFile.length(),
+                                            mimeType = "image/jpeg",
+                                            provenance = PROVENANCE_THUMBNAIL,
+                                            sourceDescription = "Carved from Database (${file.name})"
+                                        )
+                                    )
+                                }
+                            } else {
+                                // Fast count during dry-run audit
+                                val count = countJpegsInThumbdataFile(file)
+                                for (idx in 0 until count) {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(file),
+                                            displayName = "[RECOVERED_THUMBNAIL] carved_${file.name}_$idx.jpg",
+                                            sizeBytes = 32768L,
+                                            mimeType = "image/jpeg",
+                                            provenance = PROVENANCE_THUMBNAIL,
+                                            sourceDescription = "Embedded Thumbnail Cache (${file.name})"
+                                        )
+                                    )
+                                }
+                            }
+                        } else if (file.length() > 2048 && (isMediaFile(file.name) || file.name.endsWith(".thumb", ignoreCase = true))) {
+                            results.add(
+                                DiscoveredRecoveryItem(
+                                    uri = Uri.fromFile(file),
+                                    displayName = "[RECOVERED_THUMBNAIL] ${file.name}",
+                                    sizeBytes = file.length(),
+                                    mimeType = "image/jpeg",
+                                    provenance = PROVENANCE_THUMBNAIL,
+                                    sourceDescription = "Thumbnail Cache Remnant (.thumbnails)"
+                                )
+                            )
+                        }
+                    }
                 }
             }
         }
 
-        // 2. EXIF Embedded Preview Carving
+        // EXIF Embedded Previews
         try {
-            val cameraDir = File(dcimDir, "Camera")
+            val cameraDir = File(File(baseExternal, Environment.DIRECTORY_DCIM), "Camera")
             if (cameraDir.exists() && cameraDir.isDirectory) {
                 val files = cameraDir.listFiles() ?: emptyArray()
-                // Sort by newest first so recently taken/deleted items are prioritized, checking up to 100 recent photos
                 val candidates = files
                     .filter { it.isFile && it.length() > 1024 && (it.name.endsWith(".jpg", ignoreCase = true) || it.name.endsWith(".jpeg", ignoreCase = true)) }
                     .sortedByDescending { it.lastModified() }
-                    .take(100)
+                    .take(150)
 
                 for (file in candidates) {
                     try {
@@ -302,18 +356,31 @@ class DeletedMediaScanner(private val context: Context) {
                         if (exif.hasThumbnail()) {
                             val thumbBytes = exif.thumbnailBytes
                             if (thumbBytes != null && thumbBytes.isNotEmpty()) {
-                                val tempExifThumb = File(context.cacheDir, "exif_thumb_${file.name}")
-                                FileOutputStream(tempExifThumb).use { it.write(thumbBytes) }
-                                results.add(
-                                    DiscoveredRecoveryItem(
-                                        uri = Uri.fromFile(tempExifThumb),
-                                        displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
-                                        sizeBytes = thumbBytes.size.toLong(),
-                                        mimeType = "image/jpeg",
-                                        provenance = PROVENANCE_THUMBNAIL,
-                                        sourceDescription = "Embedded EXIF Header Preview"
+                                if (doCarve) {
+                                    val tempExifThumb = File(context.cacheDir, "exif_thumb_${file.name}")
+                                    FileOutputStream(tempExifThumb).use { it.write(thumbBytes) }
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(tempExifThumb),
+                                            displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
+                                            sizeBytes = thumbBytes.size.toLong(),
+                                            mimeType = "image/jpeg",
+                                            provenance = PROVENANCE_THUMBNAIL,
+                                            sourceDescription = "Embedded EXIF Header Preview"
+                                        )
                                     )
-                                )
+                                } else {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(file),
+                                            displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
+                                            sizeBytes = thumbBytes.size.toLong(),
+                                            mimeType = "image/jpeg",
+                                            provenance = PROVENANCE_THUMBNAIL,
+                                            sourceDescription = "Embedded EXIF Header Preview"
+                                        )
+                                    )
+                                }
                             }
                         }
                     } catch (_: Exception) {}
@@ -324,10 +391,95 @@ class DeletedMediaScanner(private val context: Context) {
         return results
     }
 
+    private fun countJpegsInThumbdataFile(file: File): Int {
+        var count = 0
+        try {
+            FileInputStream(file).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var prevByte = 0
+                var prevPrevByte = 0
+                var read: Int
+                while (input.read(buffer).also { read = it } != -1) {
+                    for (i in 0 until read) {
+                        val b = buffer[i].toInt() and 0xFF
+                        if (prevPrevByte == 0xFF && prevByte == 0xD8 && b == 0xFF) {
+                            count++
+                        }
+                        prevPrevByte = prevByte
+                        prevByte = b
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return count
+    }
+
+    private fun carveJpegsFromThumbdataFile(file: File, maxItems: Int = 10000): List<File> {
+        val carved = mutableListOf<File>()
+        val outputDir = File(context.cacheDir, "carved_thumbnails").apply { mkdirs() }
+        try {
+            FileInputStream(file).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var currentOut: FileOutputStream? = null
+                var currentCarvedFile: File? = null
+                var prevByte = 0
+                var prevPrevByte = 0
+                var currentBytesWritten = 0L
+                var itemCount = 0
+                var read: Int
+
+                while (input.read(buffer).also { read = it } != -1 && itemCount < maxItems) {
+                    for (i in 0 until read) {
+                        val b = buffer[i].toInt() and 0xFF
+
+                        // Detect start of JPEG: FF D8 FF
+                        if (prevPrevByte == 0xFF && prevByte == 0xD8 && b == 0xFF) {
+                            currentOut?.flush()
+                            currentOut?.close()
+                            if (currentCarvedFile != null && currentCarvedFile.length() > 1024) {
+                                carved.add(currentCarvedFile)
+                                itemCount++
+                            }
+
+                            currentCarvedFile = File(outputDir, "thumb_${file.name}_${itemCount}.jpg")
+                            currentOut = FileOutputStream(currentCarvedFile)
+                            currentOut.write(0xFF)
+                            currentOut.write(0xD8)
+                            currentOut.write(0xFF)
+                            currentBytesWritten = 3
+                        } else if (currentOut != null) {
+                            currentOut.write(b)
+                            currentBytesWritten++
+
+                            // Detect end of JPEG: FF D9 or cap at 1MB
+                            if ((prevByte == 0xFF && b == 0xD9) || currentBytesWritten > 1024 * 1024) {
+                                currentOut.flush()
+                                currentOut.close()
+                                currentOut = null
+                                if (currentCarvedFile != null && currentCarvedFile.length() > 1024) {
+                                    carved.add(currentCarvedFile)
+                                    itemCount++
+                                }
+                                currentCarvedFile = null
+                            }
+                        }
+
+                        prevPrevByte = prevByte
+                        prevByte = b
+                    }
+                }
+                currentOut?.flush()
+                currentOut?.close()
+                if (currentCarvedFile != null && currentCarvedFile.length() > 1024) {
+                    carved.add(currentCarvedFile)
+                }
+            }
+        } catch (_: Exception) {}
+        return carved
+    }
+
     /**
      * Tier 5: Removable Storage (microSD FAT32/exFAT) Remnants & LOST.DIR Carving
-     * Removable SD cards do NOT implement hardware TRIM or File-Based Encryption (FBE).
-     * Deleted data and orphan clusters in LOST.DIR linger until overwritten.
      */
     private fun discoverRemovableStorageRemnants(): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
@@ -504,8 +656,12 @@ class DeletedMediaScanner(private val context: Context) {
         for (child in children) {
             if (child.isFile) {
                 onFile(child)
-            } else if (child.isDirectory && !child.name.startsWith(".")) {
-                scanDirectoryRecursively(child, maxDepth, currentDepth + 1, onFile)
+            } else if (child.isDirectory) {
+                val name = child.name.lowercase()
+                val isPermittedHidden = name.startsWith(".thumb") || name.startsWith(".trash") || name == ".recycle" || name == ".statuses"
+                if (!child.name.startsWith(".") || isPermittedHidden) {
+                    scanDirectoryRecursively(child, maxDepth, currentDepth + 1, onFile)
+                }
             }
         }
     }
