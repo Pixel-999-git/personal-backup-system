@@ -61,10 +61,24 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Determines vendor branding for recycle bin displays (Strictly Samsung One UI for Galaxy A05s).
+     * Determines vendor branding for recycle bin displays (Dynamic with Samsung One UI as primary target).
      */
     fun getVendorTrashLabel(): String {
-        return "Samsung One UI Trash Folders"
+        val mfg = Build.MANUFACTURER.lowercase()
+        val brand = Build.BRAND.lowercase()
+        val model = Build.MODEL.lowercase()
+        return when {
+            // Samsung Galaxy A05s & Samsung One UI (Primary Target)
+            mfg.contains("samsung") || brand.contains("samsung") || model.contains("sm-") || model.contains("a05") -> "Samsung One UI Trash Folders"
+            // Xiaomi / Redmi / POCO (MIUI & HyperOS)
+            mfg.contains("xiaomi") || mfg.contains("redmi") || mfg.contains("poco") ||
+            brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco") -> "Xiaomi / MIUI Gallery Trash"
+            // OnePlus / Oppo / Realme (ColorOS & OxygenOS)
+            mfg.contains("oneplus") || mfg.contains("oppo") || mfg.contains("realme") -> "ColorOS / OxygenOS Trash Folders"
+            // Vivo / iQOO (Funtouch & OriginOS)
+            mfg.contains("vivo") || mfg.contains("iqoo") -> "Vivo / Funtouch Gallery Trash"
+            else -> "Samsung One UI Trash Folders"
+        }
     }
 
     /**
@@ -765,13 +779,25 @@ class DeletedMediaScanner(private val context: Context) {
 
         val total = trashItems.size + vendorTrash.size + deepStorageItems.size + sdRemnants.size
 
+        val oemFbeNote = when {
+            Build.MANUFACTURER.contains("samsung", ignoreCase = true) || Build.MODEL.contains("a05", ignoreCase = true) ->
+                "• Samsung Knox & File-Based Encryption (FBE): Modern Samsung One UI (Android 13-14 on Galaxy A05s) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable."
+            Build.MANUFACTURER.contains("xiaomi", ignoreCase = true) || Build.MANUFACTURER.contains("redmi", ignoreCase = true) || Build.MANUFACTURER.contains("poco", ignoreCase = true) ->
+                "• Xiaomi MIUI/HyperOS & File-Based Encryption (FBE): Modern MIUI/HyperOS encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable."
+            else ->
+                "• Android File-Based Encryption (FBE): Modern Android OS encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable."
+        }
+
+        val oemSandboxNote = when {
+            Build.MANUFACTURER.contains("samsung", ignoreCase = true) || Build.MODEL.contains("a05", ignoreCase = true) ->
+                "• Linux Sandbox & Security: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted Samsung devices, our multi-tiered engine recovers all intact system MediaStore trash, Samsung One UI recycle bins (Gallery & MyFiles), WhatsApp/Telegram duplicates, Samsung DCIM/.thumbnails, EXIF header previews, and FAT32/exFAT microSD chunks."
+            else ->
+                "• Linux Sandbox & Security: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted devices, our multi-tiered engine recovers all intact system MediaStore trash, ${getVendorTrashLabel()}, WhatsApp/Telegram duplicates, DCIM/.thumbnails, EXIF header previews, and removable storage chunks."
+        }
+
         RecoveryDiagnosticReport(
             androidVersion = Build.VERSION.SDK_INT,
-            deviceModel = if (Build.MANUFACTURER.contains("samsung", ignoreCase = true)) {
-                "${Build.MANUFACTURER} ${Build.MODEL}"
-            } else {
-                "Samsung Galaxy A05s (One UI Profile)"
-            },
+            deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
             isRooted = isRooted,
             supportsMediaStoreTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
             trashedItemsFound = trashItems.size,
@@ -783,8 +809,8 @@ class DeletedMediaScanner(private val context: Context) {
             totalRecoverableCount = total,
             rawFlashCarvingSupported = isRooted,
             limitationsExplanation = """
-                • Samsung Knox & File-Based Encryption (FBE): Modern Samsung One UI (Android 13-14 on Galaxy A05s) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable.
-                • Linux Sandbox & Security: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted Samsung devices, our multi-tiered engine recovers all intact system MediaStore trash, Samsung One UI recycle bins (Gallery & MyFiles), WhatsApp/Telegram duplicates, Samsung DCIM/.thumbnails, EXIF header previews, and FAT32/exFAT microSD chunks.
+                $oemFbeNote
+                $oemSandboxNote
                 • Zero Data Loss Guarantee: Every recovered item is permanently preserved on the Cloud Archive before expiration.
             """.trimIndent(),
             vendorTrashLabel = getVendorTrashLabel()

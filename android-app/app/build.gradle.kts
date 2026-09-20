@@ -11,8 +11,8 @@ android {
         applicationId = "com.backup.personal"
         minSdk = 26
         targetSdk = 34
-        val verCode = (project.findProperty("appVersionCode") as? String)?.toIntOrNull() ?: 8
-        val verName = (project.findProperty("appVersionName") as? String) ?: "1.0.8"
+        val verCode = (project.findProperty("appVersionCode") as? String)?.toIntOrNull() ?: 9
+        val verName = (project.findProperty("appVersionName") as? String) ?: "1.0.9"
         versionCode = verCode
         versionName = verName
     }
