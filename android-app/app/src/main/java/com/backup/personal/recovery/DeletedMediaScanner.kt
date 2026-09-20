@@ -61,18 +61,20 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Determines vendor branding for recycle bin displays (e.g. Xiaomi MIUI Gallery vs Samsung One UI).
+     * Determines vendor branding for recycle bin displays (Prioritizes Samsung One UI for Galaxy A05s).
      */
     fun getVendorTrashLabel(): String {
         val mfg = Build.MANUFACTURER.lowercase()
         val brand = Build.BRAND.lowercase()
+        val model = Build.MODEL.lowercase()
         return when {
+            // Samsung Galaxy A05s & Samsung One UI (Primary Focus)
+            mfg.contains("samsung") || brand.contains("samsung") || model.contains("sm-") || model.contains("a05") -> "Samsung One UI Trash Folders"
             mfg.contains("xiaomi") || mfg.contains("redmi") || mfg.contains("poco") ||
             brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco") -> "Xiaomi / MIUI Gallery Trash"
-            mfg.contains("samsung") || brand.contains("samsung") -> "Samsung One UI Trash Folders"
             mfg.contains("oneplus") || mfg.contains("oppo") || mfg.contains("realme") -> "ColorOS / OxygenOS Trash Folders"
             mfg.contains("vivo") || mfg.contains("iqoo") -> "Vivo / Funtouch Gallery Trash"
-            else -> "Vendor Gallery Trash Folders"
+            else -> "Samsung One UI Trash Folders"
         }
     }
 
@@ -191,28 +193,37 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Tier 2: Vendor Trash Directories (Xiaomi / MIUI / Samsung / ColorOS)
+     * Tier 2: Vendor Trash Directories (Specialized for Samsung Galaxy A05s One UI Core 5.1/6.0)
      */
     private fun discoverVendorTrashFolders(seenPaths: MutableSet<String>): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
         val baseExternal = Environment.getExternalStorageDirectory() ?: return results
 
         val candidateDirs = listOf(
-            // Xiaomi / MIUI / HyperOS
-            File(baseExternal, "MIUI/Gallery/cloud/trashbin"),
-            File(baseExternal, "MIUI/Gallery/cloud/.trashBin"),
-            File(baseExternal, "MIUI/.trash"),
-            File(baseExternal, "MIUI/trash"),
-            File(baseExternal, "Android/data/com.miui.gallery/files/trashBin"),
-            File(baseExternal, "Android/data/com.miui.gallery/cache"),
-            // Samsung One UI
+            // Samsung Galaxy A05s / Samsung One UI Gallery & MyFiles Trash (Top Priority)
             File(baseExternal, "DCIM/.trash"),
             File(baseExternal, "DCIM/Trash"),
             File(baseExternal, "Pictures/.trash"),
             File(baseExternal, "Pictures/Trash"),
+            File(baseExternal, "Movies/.trash"),
+            File(baseExternal, "Movies/Trash"),
             File(baseExternal, ".recycle"),
             File(baseExternal, "MyFiles/.recycle"),
-            // ColorOS / OxygenOS / Vivo
+            File(baseExternal, "Samsung/MyFiles/.recycle"),
+            File(baseExternal, "Samsung/.recycle"),
+            File(baseExternal, "Android/data/com.sec.android.gallery3d/files/trashBin"),
+            File(baseExternal, "Android/data/com.sec.android.gallery3d/cache"),
+            File(baseExternal, "Android/data/com.sec.android.gallery3d/files"),
+            File(baseExternal, "Android/data/com.sec.android.app.myfiles/files/trashBin"),
+            File(baseExternal, "Android/data/com.sec.android.app.myfiles/cache"),
+            File(baseExternal, "Android/data/com.sec.android.app.myfiles/files"),
+            File(baseExternal, "Android/data/com.sec.android.app.sbrowser/cache"),
+            File(baseExternal, "Android/data/com.samsung.android.messaging/cache"),
+            // Secondary Vendor Trash Fallbacks
+            File(baseExternal, "MIUI/Gallery/cloud/trashbin"),
+            File(baseExternal, "MIUI/Gallery/cloud/.trashBin"),
+            File(baseExternal, "MIUI/.trash"),
+            File(baseExternal, "MIUI/trash"),
             File(baseExternal, ".recycle_bin"),
             File(baseExternal, "DCIM/.recycle"),
             File(baseExternal, "Pictures/.recycle")
@@ -223,10 +234,16 @@ class DeletedMediaScanner(private val context: Context) {
                 scanDirectoryRecursively(dir, maxDepth = 4) { file ->
                     if (file.isFile && file.length() > 2048 && isMediaFile(file.name)) {
                         if (seenPaths.add(file.absolutePath)) {
+                            val isSamsung = getVendorTrashLabel().contains("Samsung", ignoreCase = true) ||
+                                    dir.absolutePath.contains("com.sec") ||
+                                    dir.name.contains("trash", ignoreCase = true) ||
+                                    dir.name.contains("recycle", ignoreCase = true)
+                            val tag = if (isSamsung) "[RECOVERED_SAMSUNG_TRASH]" else "[RECOVERED_VENDOR_TRASH]"
+
                             results.add(
                                 DiscoveredRecoveryItem(
                                     uri = Uri.fromFile(file),
-                                    displayName = "[RECOVERED_VENDOR_TRASH] ${file.name}",
+                                    displayName = "$tag ${file.name}",
                                     sizeBytes = file.length(),
                                     mimeType = resolveMimeType(file.name),
                                     provenance = PROVENANCE_VENDOR_TRASH,
@@ -323,18 +340,25 @@ class DeletedMediaScanner(private val context: Context) {
             }
         }
 
-        // 2. High-Yield Target Folders Crawl (Social Apps, App Caches, Hidden Media)
+        // 2. High-Yield Target Folders Crawl (Specialized for Samsung Galaxy A05s One UI Storage)
         val rootsToCrawl = listOf(
-            File(baseExternal, "Android/media"),
-            File(baseExternal, "Android/data"),
-            File(baseExternal, "MIUI"),
-            File(baseExternal, "DCIM"),
-            File(baseExternal, "Pictures"),
-            File(baseExternal, "Movies"),
-            File(baseExternal, "Download"),
+            File(baseExternal, "DCIM"),                    // Samsung Camera, Screenshots, Screen recordings, .thumbnails, .trash
+            File(baseExternal, "Pictures"),                // Samsung Gallery Albums, Screenshots, .trash
+            File(baseExternal, "Samsung"),                 // Samsung MyFiles & System Exports
+            File(baseExternal, "Recordings"),              // Samsung Voice Recorder Primary
+            File(baseExternal, "Voice Recorder"),          // Samsung Voice Recorder Alternate
+            File(baseExternal, "Android/data/com.sec.android.gallery3d"),  // Samsung Gallery 3D Cache/Trash
+            File(baseExternal, "Android/data/com.sec.android.app.myfiles"), // Samsung MyFiles Cache/Trash
+            File(baseExternal, "Android/data/com.sec.android.app.sbrowser"),// Samsung Internet Cache
+            File(baseExternal, "Android/data/com.samsung.android.messaging"), // Samsung Messages
+            File(baseExternal, "Android/media"),           // WhatsApp, Telegram, Social Media
+            File(baseExternal, "Android/data"),            // Full App Data Caches
+            File(baseExternal, "Download"),                // Downloads (Samsung Internet, Chrome)
+            File(baseExternal, "Movies"),                  // Video captures
             File(baseExternal, "WhatsApp"),
             File(baseExternal, "Telegram"),
-            File(baseExternal, ".cache")
+            File(baseExternal, ".cache"),
+            File(baseExternal, "MIUI")                     // Fallback multi-device support
         )
 
         var filesInspected = 0
@@ -406,7 +430,7 @@ class DeletedMediaScanner(private val context: Context) {
             }
         }
 
-        // 3. EXIF Embedded Previews from Camera Roll
+        // 3. EXIF Embedded Previews from Camera Roll (Samsung Galaxy A05s Camera)
         try {
             val cameraDir = File(File(baseExternal, Environment.DIRECTORY_DCIM), "Camera")
             if (cameraDir.exists() && cameraDir.isDirectory) {
@@ -463,7 +487,7 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Tier 5: Removable Storage (microSD FAT32/exFAT) Remnants & LOST.DIR Carving
+     * Tier 5: Removable Storage (Samsung Galaxy A05s MicroSD Slot - FAT32/exFAT) Remnants & LOST.DIR Carving
      */
     private fun discoverRemovableStorageRemnants(seenPaths: MutableSet<String>): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
@@ -477,6 +501,7 @@ class DeletedMediaScanner(private val context: Context) {
                 }
 
                 if (sdRoot != null && sdRoot.exists()) {
+                    // 1. Scan LOST.DIR on Samsung SD Card and carve media headers
                     val lostDir = File(sdRoot, "LOST.DIR")
                     if (lostDir.exists() && lostDir.isDirectory) {
                         val chunks = lostDir.listFiles() ?: emptyArray()
@@ -491,7 +516,7 @@ class DeletedMediaScanner(private val context: Context) {
                                             sizeBytes = chunk.length(),
                                             mimeType = carvedType.first,
                                             provenance = PROVENANCE_LOST_DIR,
-                                            sourceDescription = "Removable SD LOST.DIR Carved ${carvedType.second.uppercase()}"
+                                            sourceDescription = "Samsung SD LOST.DIR Carved ${carvedType.second.uppercase()}"
                                         )
                                     )
                                 }
@@ -499,20 +524,54 @@ class DeletedMediaScanner(private val context: Context) {
                         }
                     }
 
-                    val sdTrash = File(sdRoot, ".Trash-1000")
-                    if (sdTrash.exists() && sdTrash.isDirectory) {
-                        scanDirectoryRecursively(sdTrash, maxDepth = 2) { file ->
-                            if (file.isFile && isMediaFile(file.name) && seenPaths.add(file.absolutePath)) {
-                                results.add(
-                                    DiscoveredRecoveryItem(
-                                        uri = Uri.fromFile(file),
-                                        displayName = "[RECOVERED_SDCARD] ${file.name}",
-                                        sizeBytes = file.length(),
-                                        mimeType = resolveMimeType(file.name),
-                                        provenance = PROVENANCE_REMOVABLE_SD,
-                                        sourceDescription = "Removable SD Trash (.Trash-1000)"
+                    // 2. Scan Samsung One UI SD Card Trash Folders & Recycle Bins
+                    val sdTrashCandidates = listOf(
+                        File(sdRoot, "DCIM/.trash"),
+                        File(sdRoot, "Pictures/.trash"),
+                        File(sdRoot, "Movies/.trash"),
+                        File(sdRoot, ".Trash-1000"),
+                        File(sdRoot, ".recycle"),
+                        File(sdRoot, "Android/data/com.sec.android.gallery3d/files/trashBin")
+                    )
+                    for (sdTrash in sdTrashCandidates) {
+                        if (sdTrash.exists() && sdTrash.isDirectory) {
+                            scanDirectoryRecursively(sdTrash, maxDepth = 3) { file ->
+                                if (file.isFile && isMediaFile(file.name) && seenPaths.add(file.absolutePath)) {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(file),
+                                            displayName = "[RECOVERED_SAMSUNG_TRASH] ${file.name}",
+                                            sizeBytes = file.length(),
+                                            mimeType = resolveMimeType(file.name),
+                                            provenance = PROVENANCE_REMOVABLE_SD,
+                                            sourceDescription = "Samsung SD Card Trash (${sdTrash.name})"
+                                        )
                                     )
-                                )
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Scan Samsung SD Card Thumbnail Caches
+                    val sdThumbCandidates = listOf(
+                        File(sdRoot, "DCIM/.thumbnails"),
+                        File(sdRoot, "Pictures/.thumbnails")
+                    )
+                    for (sdThumb in sdThumbCandidates) {
+                        if (sdThumb.exists() && sdThumb.isDirectory) {
+                            scanDirectoryRecursively(sdThumb, maxDepth = 2) { file ->
+                                if (file.isFile && file.length() > 2048 && (isMediaFile(file.name) || file.name.endsWith(".thumb", ignoreCase = true)) && seenPaths.add(file.absolutePath)) {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(file),
+                                            displayName = "[RECOVERED_THUMBNAIL] ${file.name}",
+                                            sizeBytes = file.length(),
+                                            mimeType = "image/jpeg",
+                                            provenance = PROVENANCE_THUMBNAIL,
+                                            sourceDescription = "Samsung SD Card Thumbnail Cache"
+                                        )
+                                    )
+                                }
                             }
                         }
                     }
@@ -731,8 +790,8 @@ class DeletedMediaScanner(private val context: Context) {
             totalRecoverableCount = total,
             rawFlashCarvingSupported = isRooted,
             limitationsExplanation = """
-                • File-Based Encryption (FBE): Modern Android (11-14) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable.
-                • Linux Sandbox & SELinux: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted devices, our multi-tiered engine recovers all intact system trash, ${getVendorTrashLabel()}, WhatsApp/Telegram duplicates, EXIF header previews, and FAT32/exFAT microSD chunks.
+                • Samsung Knox & File-Based Encryption (FBE): Modern Samsung One UI (Android 13-14 on Galaxy A05s) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable.
+                • Linux Sandbox & Security: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted Samsung devices, our multi-tiered engine recovers all intact system MediaStore trash, Samsung One UI recycle bins (Gallery & MyFiles), WhatsApp/Telegram duplicates, Samsung DCIM/.thumbnails, EXIF header previews, and FAT32/exFAT microSD chunks.
                 • Zero Data Loss Guarantee: Every recovered item is permanently preserved on the Windows Archive before expiration.
             """.trimIndent(),
             vendorTrashLabel = getVendorTrashLabel()
