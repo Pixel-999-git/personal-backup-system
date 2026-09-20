@@ -33,3 +33,6 @@ staging/
 temp/
 logs/
 *.log
+*.db-wal
+*.db-shm
+release/android/*.apk

@@ -29,7 +29,8 @@ data class RecoveryDiagnosticReport(
     val removableStorageRemnantsFound: Int,
     val totalRecoverableCount: Int,
     val rawFlashCarvingSupported: Boolean,
-    val limitationsExplanation: String
+    val limitationsExplanation: String,
+    val vendorTrashLabel: String = "Vendor Gallery Trash"
 )
 
 data class DiscoveredRecoveryItem(
@@ -60,51 +61,70 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Dry-run analysis: Discovers all recoverable items across forensic sources
-     * without modifying the database or creating persistent staging copies.
+     * Determines vendor branding for recycle bin displays (e.g. Xiaomi MIUI Gallery vs Samsung One UI).
      */
-    suspend fun analyzeRecoverableMedia(doCarve: Boolean = false): List<DiscoveredRecoveryItem> = withContext(Dispatchers.IO) {
+    fun getVendorTrashLabel(): String {
+        val mfg = Build.MANUFACTURER.lowercase()
+        val brand = Build.BRAND.lowercase()
+        return when {
+            mfg.contains("xiaomi") || mfg.contains("redmi") || mfg.contains("poco") ||
+            brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco") -> "Xiaomi / MIUI Gallery Trash"
+            mfg.contains("samsung") || brand.contains("samsung") -> "Samsung One UI Trash Folders"
+            mfg.contains("oneplus") || mfg.contains("oppo") || mfg.contains("realme") -> "ColorOS / OxygenOS Trash Folders"
+            mfg.contains("vivo") || mfg.contains("iqoo") -> "Vivo / Funtouch Gallery Trash"
+            else -> "Vendor Gallery Trash Folders"
+        }
+    }
+
+    /**
+     * Deep forensic analysis: Scans all recoverable storage areas (MediaStore trash, vendor trash,
+     * social media caches, full storage recursive crawl with magic byte inspection, .thumbdata carving).
+     */
+    suspend fun analyzeRecoverableMedia(
+        doCarve: Boolean = false,
+        onProgress: ((String) -> Unit)? = null
+    ): List<DiscoveredRecoveryItem> = withContext(Dispatchers.IO) {
         val discovered = mutableListOf<DiscoveredRecoveryItem>()
-        discovered.addAll(discoverMediaStoreTrash())
-        discovered.addAll(discoverVendorTrashFolders())
-        discovered.addAll(discoverSocialAndAppMediaCaches())
-        discovered.addAll(discoverThumbnailAndExifRemnants(doCarve))
-        discovered.addAll(discoverRemovableStorageRemnants())
+        val seenPaths = HashSet<String>()
+
+        onProgress?.invoke("Auditing system MediaStore trash...")
+        val mediaStoreTrash = discoverMediaStoreTrash()
+        for (item in mediaStoreTrash) {
+            seenPaths.add(item.uri.toString())
+            discovered.add(item)
+        }
+
+        onProgress?.invoke("Scanning vendor gallery trash...")
+        val vendorTrash = discoverVendorTrashFolders(seenPaths)
+        discovered.addAll(vendorTrash)
+
+        onProgress?.invoke("Crawling internal storage & app caches...")
+        val deepStorageItems = discoverDeepStorageAndCaches(doCarve, seenPaths, onProgress)
+        discovered.addAll(deepStorageItems)
+
+        onProgress?.invoke("Checking removable SD storage...")
+        val sdRemnants = discoverRemovableStorageRemnants(seenPaths)
+        discovered.addAll(sdRemnants)
+
+        onProgress?.invoke("Scan complete: found ${discovered.size} recoverable items.")
         discovered
     }
 
     /**
      * Executes the recovery pipeline: analyzes all sources, carves thumbnail databases,
-     * and stages every discovered item into the durable pending backup queue.
+     * and stages discovered items into the durable pending backup queue in batch.
      */
-    suspend fun scanAndQueueRecoverableMedia(): Int = withContext(Dispatchers.IO) {
-        val items = analyzeRecoverableMedia(doCarve = true)
-        var stagedCount = 0
-        val tempFilesToClean = mutableListOf<File>()
+    suspend fun scanAndQueueRecoverableMedia(
+        onScanProgress: ((String) -> Unit)? = null,
+        onQueueProgress: ((Int, Int) -> Unit)? = null
+    ): Int = withContext(Dispatchers.IO) {
+        val items = analyzeRecoverableMedia(doCarve = true, onProgress = onScanProgress)
+        val stagedCount = engine.stageManualFilesBatch(items, onProgress = onQueueProgress)
 
-        for (item in items) {
-            val success = engine.stageManualFile(
-                uri = item.uri,
-                displayName = item.displayName,
-                sizeBytes = item.sizeBytes,
-                mimeType = item.mimeType,
-                provenance = item.provenance
-            )
-            if (success) stagedCount++
-
-            if (item.uri.scheme == "file") {
-                item.uri.path?.let { path ->
-                    val file = File(path)
-                    if (file.exists() && (file.parentFile == context.cacheDir || file.parentFile?.name == "carved_thumbnails")) {
-                        tempFilesToClean.add(file)
-                    }
-                }
-            }
-        }
-
-        // Clean up temporary extracted previews after durable staging
-        for (f in tempFilesToClean) {
-            try { f.delete() } catch (_: Exception) {}
+        // Clean up temporary extracted previews
+        val tempDir = File(context.cacheDir, "carved_thumbnails")
+        if (tempDir.exists()) {
+            try { tempDir.deleteRecursively() } catch (_: Exception) {}
         }
 
         stagedCount
@@ -112,7 +132,6 @@ class DeletedMediaScanner(private val context: Context) {
 
     /**
      * Tier 1: Android MediaStore Trash (IS_TRASHED = 1)
-     * Recovers photos, videos, and voice memos placed in system trash before 30-day purge.
      */
     private fun discoverMediaStoreTrash(): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
@@ -166,102 +185,55 @@ class DeletedMediaScanner(private val context: Context) {
                         )
                     }
                 }
-            } catch (_: Exception) {
-                // Scoped storage check
-            }
+            } catch (_: Exception) {}
         }
         return results
     }
 
     /**
-     * Tier 2: Vendor / Samsung Gallery Trash Directories
+     * Tier 2: Vendor Trash Directories (Xiaomi / MIUI / Samsung / ColorOS)
      */
-    private fun discoverVendorTrashFolders(): List<DiscoveredRecoveryItem> {
+    private fun discoverVendorTrashFolders(seenPaths: MutableSet<String>): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
         val baseExternal = Environment.getExternalStorageDirectory() ?: return results
 
         val candidateDirs = listOf(
+            // Xiaomi / MIUI / HyperOS
+            File(baseExternal, "MIUI/Gallery/cloud/trashbin"),
+            File(baseExternal, "MIUI/Gallery/cloud/.trashBin"),
+            File(baseExternal, "MIUI/.trash"),
+            File(baseExternal, "MIUI/trash"),
+            File(baseExternal, "Android/data/com.miui.gallery/files/trashBin"),
+            File(baseExternal, "Android/data/com.miui.gallery/cache"),
+            // Samsung One UI
             File(baseExternal, "DCIM/.trash"),
             File(baseExternal, "DCIM/Trash"),
             File(baseExternal, "Pictures/.trash"),
             File(baseExternal, "Pictures/Trash"),
             File(baseExternal, ".recycle"),
-            File(baseExternal, "MyFiles/.recycle")
+            File(baseExternal, "MyFiles/.recycle"),
+            // ColorOS / OxygenOS / Vivo
+            File(baseExternal, ".recycle_bin"),
+            File(baseExternal, "DCIM/.recycle"),
+            File(baseExternal, "Pictures/.recycle")
         )
 
         for (dir in candidateDirs) {
             if (dir.exists() && dir.isDirectory) {
                 scanDirectoryRecursively(dir, maxDepth = 4) { file ->
                     if (file.isFile && file.length() > 2048 && isMediaFile(file.name)) {
-                        results.add(
-                            DiscoveredRecoveryItem(
-                                uri = Uri.fromFile(file),
-                                displayName = "[RECOVERED_SAMSUNG_TRASH] ${file.name}",
-                                sizeBytes = file.length(),
-                                mimeType = resolveMimeType(file.name),
-                                provenance = PROVENANCE_VENDOR_TRASH,
-                                sourceDescription = "Samsung Gallery/MyFiles Trash (${dir.name})"
+                        if (seenPaths.add(file.absolutePath)) {
+                            results.add(
+                                DiscoveredRecoveryItem(
+                                    uri = Uri.fromFile(file),
+                                    displayName = "[RECOVERED_VENDOR_TRASH] ${file.name}",
+                                    sizeBytes = file.length(),
+                                    mimeType = resolveMimeType(file.name),
+                                    provenance = PROVENANCE_VENDOR_TRASH,
+                                    sourceDescription = "${getVendorTrashLabel()} (${dir.name})"
+                                )
                             )
-                        )
-                    }
-                }
-            }
-        }
-        return results
-    }
-
-    /**
-     * Tier 3: Social & App Media Caches (Intact Surviving Copies & Hidden .nomedia)
-     */
-    private fun discoverSocialAndAppMediaCaches(): List<DiscoveredRecoveryItem> {
-        val results = mutableListOf<DiscoveredRecoveryItem>()
-        val baseExternal = Environment.getExternalStorageDirectory() ?: return results
-
-        val candidateDirs = listOf(
-            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images"),
-            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Sent"),
-            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
-            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video"),
-            File(baseExternal, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/Sent"),
-            File(baseExternal, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Images"),
-            File(baseExternal, "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/WhatsApp Business Video"),
-            File(baseExternal, "WhatsApp/Media/WhatsApp Images"),
-            File(baseExternal, "WhatsApp/Media/WhatsApp Video"),
-            File(baseExternal, "Android/media/org.telegram.messenger/Telegram/Telegram Images"),
-            File(baseExternal, "Android/media/org.telegram.messenger/Telegram/Telegram Video"),
-            File(baseExternal, "Movies/Telegram"),
-            File(baseExternal, "Pictures/Telegram"),
-            File(baseExternal, "Pictures/Screenshots"),
-            File(baseExternal, "Pictures/Facebook"),
-            File(baseExternal, "Pictures/Instagram"),
-            File(baseExternal, "Pictures/Twitter"),
-            File(baseExternal, "Pictures/Reddit"),
-            File(baseExternal, "DCIM/Facebook"),
-            File(baseExternal, "Download")
-        )
-
-        for (dir in candidateDirs) {
-            if (dir.exists() && dir.isDirectory) {
-                scanDirectoryRecursively(dir, maxDepth = 2) { file ->
-                    if (file.isFile && file.length() > 8 * 1024 && isMediaFile(file.name)) {
-                        val appName = when {
-                            file.absolutePath.contains("whatsapp", ignoreCase = true) -> "WhatsApp"
-                            file.absolutePath.contains("telegram", ignoreCase = true) -> "Telegram"
-                            file.absolutePath.contains("screenshot", ignoreCase = true) -> "Screenshots"
-                            file.absolutePath.contains("facebook", ignoreCase = true) -> "Facebook"
-                            file.absolutePath.contains("instagram", ignoreCase = true) -> "Instagram"
-                            else -> "App Media"
                         }
-                        results.add(
-                            DiscoveredRecoveryItem(
-                                uri = Uri.fromFile(file),
-                                displayName = "[RECOVERED_APP_CACHE] ${file.name}",
-                                sizeBytes = file.length(),
-                                mimeType = resolveMimeType(file.name),
-                                provenance = PROVENANCE_APP_CACHE,
-                                sourceDescription = "Accessible App Media Copy ($appName)"
-                            )
-                        )
                     }
                 }
             }
@@ -270,20 +242,26 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Tier 4: Thumbnail & Embedded EXIF Remnants
-     * Recovers previews from all .thumbnails folders, carves Android .thumbdata databases,
-     * and extracts embedded EXIF previews from photos.
+     * Tier 3 & 4: Deep Storage Crawl & Cache Carving (Matching DiskDigger Deep Scan)
+     * Walks external storage, carves .thumbdata databases, extracts EXIF previews,
+     * and inspects magic bytes on extensionless app cache files (Glide, Fresco, OkHttp, etc.).
      */
-    private fun discoverThumbnailAndExifRemnants(doCarve: Boolean = false): List<DiscoveredRecoveryItem> {
+    private fun discoverDeepStorageAndCaches(
+        doCarve: Boolean,
+        seenPaths: MutableSet<String>,
+        onProgress: ((String) -> Unit)?
+    ): List<DiscoveredRecoveryItem> {
         val results = mutableListOf<DiscoveredRecoveryItem>()
         val baseExternal = Environment.getExternalStorageDirectory() ?: return results
 
+        // 1. Scan and Carve .thumbdata Databases and .thumbnails Folders
         val thumbCandidateDirs = listOf(
             File(baseExternal, "DCIM/.thumbnails"),
             File(baseExternal, "Pictures/.thumbnails"),
             File(baseExternal, "Movies/.thumbnails"),
             File(baseExternal, ".thumbnails"),
-            File(baseExternal, "Android/media/.thumbnails")
+            File(baseExternal, "Android/media/.thumbnails"),
+            File(baseExternal, "MIUI/.thumbnails")
         )
 
         for (thumbDir in thumbCandidateDirs) {
@@ -293,54 +271,142 @@ class DeletedMediaScanner(private val context: Context) {
                     if (file.isFile) {
                         if (file.name.startsWith(".thumbdata")) {
                             if (doCarve) {
-                                // Extract actual JPEG files during queueing
                                 val carved = carveJpegsFromThumbdataFile(file)
                                 for (carvedFile in carved) {
-                                    results.add(
-                                        DiscoveredRecoveryItem(
-                                            uri = Uri.fromFile(carvedFile),
-                                            displayName = "[RECOVERED_THUMBNAIL] ${carvedFile.name}",
-                                            sizeBytes = carvedFile.length(),
-                                            mimeType = "image/jpeg",
-                                            provenance = PROVENANCE_THUMBNAIL,
-                                            sourceDescription = "Carved from Database (${file.name})"
+                                    if (seenPaths.add(carvedFile.absolutePath)) {
+                                        results.add(
+                                            DiscoveredRecoveryItem(
+                                                uri = Uri.fromFile(carvedFile),
+                                                displayName = "[RECOVERED_THUMBNAIL] ${carvedFile.name}",
+                                                sizeBytes = carvedFile.length(),
+                                                mimeType = "image/jpeg",
+                                                provenance = PROVENANCE_THUMBNAIL,
+                                                sourceDescription = "Carved from Database (${file.name})"
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             } else {
-                                // Fast count during dry-run audit
                                 val count = countJpegsInThumbdataFile(file)
                                 for (idx in 0 until count) {
-                                    results.add(
-                                        DiscoveredRecoveryItem(
-                                            uri = Uri.fromFile(file),
-                                            displayName = "[RECOVERED_THUMBNAIL] carved_${file.name}_$idx.jpg",
-                                            sizeBytes = 32768L,
-                                            mimeType = "image/jpeg",
-                                            provenance = PROVENANCE_THUMBNAIL,
-                                            sourceDescription = "Embedded Thumbnail Cache (${file.name})"
+                                    val syntheticPath = "${file.absolutePath}#carved_$idx"
+                                    if (seenPaths.add(syntheticPath)) {
+                                        results.add(
+                                            DiscoveredRecoveryItem(
+                                                uri = Uri.fromFile(file),
+                                                displayName = "[RECOVERED_THUMBNAIL] carved_${file.name}_$idx.jpg",
+                                                sizeBytes = 32768L,
+                                                mimeType = "image/jpeg",
+                                                provenance = PROVENANCE_THUMBNAIL,
+                                                sourceDescription = "Embedded Thumbnail Cache (${file.name})"
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
                         } else if (file.length() > 2048 && (isMediaFile(file.name) || file.name.endsWith(".thumb", ignoreCase = true))) {
-                            results.add(
-                                DiscoveredRecoveryItem(
-                                    uri = Uri.fromFile(file),
-                                    displayName = "[RECOVERED_THUMBNAIL] ${file.name}",
-                                    sizeBytes = file.length(),
-                                    mimeType = "image/jpeg",
-                                    provenance = PROVENANCE_THUMBNAIL,
-                                    sourceDescription = "Thumbnail Cache Remnant (.thumbnails)"
+                            if (seenPaths.add(file.absolutePath)) {
+                                results.add(
+                                    DiscoveredRecoveryItem(
+                                        uri = Uri.fromFile(file),
+                                        displayName = "[RECOVERED_THUMBNAIL] ${file.name}",
+                                        sizeBytes = file.length(),
+                                        mimeType = "image/jpeg",
+                                        provenance = PROVENANCE_THUMBNAIL,
+                                        sourceDescription = "Thumbnail Cache Remnant (.thumbnails)"
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // EXIF Embedded Previews
+        // 2. High-Yield Target Folders Crawl (Social Apps, App Caches, Hidden Media)
+        val rootsToCrawl = listOf(
+            File(baseExternal, "Android/media"),
+            File(baseExternal, "Android/data"),
+            File(baseExternal, "MIUI"),
+            File(baseExternal, "DCIM"),
+            File(baseExternal, "Pictures"),
+            File(baseExternal, "Movies"),
+            File(baseExternal, "Download"),
+            File(baseExternal, "WhatsApp"),
+            File(baseExternal, "Telegram"),
+            File(baseExternal, ".cache")
+        )
+
+        var filesInspected = 0
+        for (root in rootsToCrawl) {
+            if (!root.exists() || !root.isDirectory) continue
+            scanDirectoryRecursivelyWithDepth(
+                dir = root,
+                maxDepth = 6,
+                currentDepth = 0,
+                shouldSkip = { subDir ->
+                    // Skip our own app's staging directory to avoid looping
+                    subDir.absolutePath.contains("com.backup.personal")
+                }
+            ) { file ->
+                filesInspected++
+                if (filesInspected % 250 == 0) {
+                    onProgress?.invoke("Scanning storage: $filesInspected files inspected (${results.size} media found)...")
+                }
+
+                if (!file.isFile || file.length() < 2048) return@scanDirectoryRecursivelyWithDepth
+                if (seenPaths.contains(file.absolutePath)) return@scanDirectoryRecursivelyWithDepth
+
+                val name = file.name
+                val path = file.absolutePath
+
+                // Check 1: Explicit Media File
+                if (isMediaFile(name)) {
+                    val isSocialOrCache = path.contains("whatsapp", ignoreCase = true) ||
+                            path.contains("telegram", ignoreCase = true) ||
+                            path.contains("facebook", ignoreCase = true) ||
+                            path.contains("instagram", ignoreCase = true) ||
+                            path.contains("cache", ignoreCase = true) ||
+                            path.contains(".thumb", ignoreCase = true) ||
+                            path.contains("sent", ignoreCase = true) ||
+                            path.contains(".statuses", ignoreCase = true) ||
+                            file.parentFile?.name?.startsWith(".") == true
+
+                    if (isSocialOrCache) {
+                        seenPaths.add(file.absolutePath)
+                        results.add(
+                            DiscoveredRecoveryItem(
+                                uri = Uri.fromFile(file),
+                                displayName = "[RECOVERED_APP_CACHE] $name",
+                                sizeBytes = file.length(),
+                                mimeType = resolveMimeType(name),
+                                provenance = PROVENANCE_APP_CACHE,
+                                sourceDescription = "Accessible App Media Copy (${file.parentFile?.name ?: "Storage"})"
+                            )
+                        )
+                    }
+                } else if (file.length() in 4096..30_000_000) {
+                    // Check 2: Extensionless or Hashed Cache File with Valid Image Magic Bytes
+                    // (Glide, Fresco, OkHttp disk caches widely used across Instagram, Chrome, TikTok, etc.)
+                    val magic = checkImageMagic(file)
+                    if (magic != null) {
+                        seenPaths.add(file.absolutePath)
+                        results.add(
+                            DiscoveredRecoveryItem(
+                                uri = Uri.fromFile(file),
+                                displayName = "[RECOVERED_CACHE] ${name}.${magic.second}",
+                                sizeBytes = file.length(),
+                                mimeType = magic.first,
+                                provenance = PROVENANCE_THUMBNAIL,
+                                sourceDescription = "Deep Storage Cache Carved ${magic.second.uppercase()} (${file.parentFile?.name ?: "Cache"})"
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. EXIF Embedded Previews from Camera Roll
         try {
             val cameraDir = File(File(baseExternal, Environment.DIRECTORY_DCIM), "Camera")
             if (cameraDir.exists() && cameraDir.isDirectory) {
@@ -359,27 +425,32 @@ class DeletedMediaScanner(private val context: Context) {
                                 if (doCarve) {
                                     val tempExifThumb = File(context.cacheDir, "exif_thumb_${file.name}")
                                     FileOutputStream(tempExifThumb).use { it.write(thumbBytes) }
-                                    results.add(
-                                        DiscoveredRecoveryItem(
-                                            uri = Uri.fromFile(tempExifThumb),
-                                            displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
-                                            sizeBytes = thumbBytes.size.toLong(),
-                                            mimeType = "image/jpeg",
-                                            provenance = PROVENANCE_THUMBNAIL,
-                                            sourceDescription = "Embedded EXIF Header Preview"
+                                    if (seenPaths.add(tempExifThumb.absolutePath)) {
+                                        results.add(
+                                            DiscoveredRecoveryItem(
+                                                uri = Uri.fromFile(tempExifThumb),
+                                                displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
+                                                sizeBytes = thumbBytes.size.toLong(),
+                                                mimeType = "image/jpeg",
+                                                provenance = PROVENANCE_THUMBNAIL,
+                                                sourceDescription = "Embedded EXIF Header Preview"
+                                            )
                                         )
-                                    )
+                                    }
                                 } else {
-                                    results.add(
-                                        DiscoveredRecoveryItem(
-                                            uri = Uri.fromFile(file),
-                                            displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
-                                            sizeBytes = thumbBytes.size.toLong(),
-                                            mimeType = "image/jpeg",
-                                            provenance = PROVENANCE_THUMBNAIL,
-                                            sourceDescription = "Embedded EXIF Header Preview"
+                                    val syntheticKey = "${file.absolutePath}#exif"
+                                    if (seenPaths.add(syntheticKey)) {
+                                        results.add(
+                                            DiscoveredRecoveryItem(
+                                                uri = Uri.fromFile(file),
+                                                displayName = "[RECOVERED_THUMBNAIL] exif_preview_${file.name}",
+                                                sizeBytes = thumbBytes.size.toLong(),
+                                                mimeType = "image/jpeg",
+                                                provenance = PROVENANCE_THUMBNAIL,
+                                                sourceDescription = "Embedded EXIF Header Preview"
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
                         }
@@ -389,6 +460,130 @@ class DeletedMediaScanner(private val context: Context) {
         } catch (_: Exception) {}
 
         return results
+    }
+
+    /**
+     * Tier 5: Removable Storage (microSD FAT32/exFAT) Remnants & LOST.DIR Carving
+     */
+    private fun discoverRemovableStorageRemnants(seenPaths: MutableSet<String>): List<DiscoveredRecoveryItem> {
+        val results = mutableListOf<DiscoveredRecoveryItem>()
+        val externalDirs = ContextCompat.getExternalFilesDirs(context, null)
+
+        for (dir in externalDirs) {
+            if (dir != null && Environment.isExternalStorageRemovable(dir)) {
+                var sdRoot: File? = dir
+                while (sdRoot != null && sdRoot.parentFile != null && sdRoot.parentFile?.name != "storage") {
+                    sdRoot = sdRoot.parentFile
+                }
+
+                if (sdRoot != null && sdRoot.exists()) {
+                    val lostDir = File(sdRoot, "LOST.DIR")
+                    if (lostDir.exists() && lostDir.isDirectory) {
+                        val chunks = lostDir.listFiles() ?: emptyArray()
+                        for (chunk in chunks) {
+                            if (chunk.isFile && chunk.length() > 8192) {
+                                val carvedType = carveFileMagic(chunk)
+                                if (carvedType != null && seenPaths.add(chunk.absolutePath)) {
+                                    results.add(
+                                        DiscoveredRecoveryItem(
+                                            uri = Uri.fromFile(chunk),
+                                            displayName = "[RECOVERED_LOSTDIR] ${chunk.name}.${carvedType.second}",
+                                            sizeBytes = chunk.length(),
+                                            mimeType = carvedType.first,
+                                            provenance = PROVENANCE_LOST_DIR,
+                                            sourceDescription = "Removable SD LOST.DIR Carved ${carvedType.second.uppercase()}"
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    val sdTrash = File(sdRoot, ".Trash-1000")
+                    if (sdTrash.exists() && sdTrash.isDirectory) {
+                        scanDirectoryRecursively(sdTrash, maxDepth = 2) { file ->
+                            if (file.isFile && isMediaFile(file.name) && seenPaths.add(file.absolutePath)) {
+                                results.add(
+                                    DiscoveredRecoveryItem(
+                                        uri = Uri.fromFile(file),
+                                        displayName = "[RECOVERED_SDCARD] ${file.name}",
+                                        sizeBytes = file.length(),
+                                        mimeType = resolveMimeType(file.name),
+                                        provenance = PROVENANCE_REMOVABLE_SD,
+                                        sourceDescription = "Removable SD Trash (.Trash-1000)"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return results
+    }
+
+    /**
+     * Inspects the first 12 bytes of a file to detect valid JPEG, PNG, WebP, or GIF image magic headers.
+     */
+    fun checkImageMagic(file: File): Pair<String, String>? {
+        try {
+            if (!file.canRead() || file.length() < 12) return null
+            FileInputStream(file).use { input ->
+                val header = ByteArray(12)
+                val read = input.read(header)
+                if (read < 12) return null
+
+                // JPEG: FF D8 FF
+                if ((header[0].toInt() and 0xFF) == 0xFF &&
+                    (header[1].toInt() and 0xFF) == 0xD8 &&
+                    (header[2].toInt() and 0xFF) == 0xFF) {
+                    return Pair("image/jpeg", "jpg")
+                }
+
+                // PNG: 89 50 4E 47 0D 0A 1A 0A
+                if ((header[0].toInt() and 0xFF) == 0x89 &&
+                    (header[1].toInt() and 0xFF) == 0x50 &&
+                    (header[2].toInt() and 0xFF) == 0x4E &&
+                    (header[3].toInt() and 0xFF) == 0x47) {
+                    return Pair("image/png", "png")
+                }
+
+                // WebP: RIFF .... WEBP
+                if (header[0] == 'R'.code.toByte() &&
+                    header[1] == 'I'.code.toByte() &&
+                    header[2] == 'F'.code.toByte() &&
+                    header[3] == 'F'.code.toByte() &&
+                    header[8] == 'W'.code.toByte() &&
+                    header[9] == 'E'.code.toByte() &&
+                    header[10] == 'B'.code.toByte() &&
+                    header[11] == 'P'.code.toByte()) {
+                    return Pair("image/webp", "webp")
+                }
+
+                // GIF: GIF87a or GIF89a
+                if (header[0] == 'G'.code.toByte() &&
+                    header[1] == 'I'.code.toByte() &&
+                    header[2] == 'F'.code.toByte() &&
+                    header[3] == '8'.code.toByte()) {
+                    return Pair("image/gif", "gif")
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    private fun carveFileMagic(file: File): Pair<String, String>? {
+        return checkImageMagic(file) ?: run {
+            try {
+                FileInputStream(file).use { input ->
+                    val header = ByteArray(12)
+                    val read = input.read(header)
+                    if (read >= 8 && header[4] == 0x66.toByte() && header[5] == 0x74.toByte() && header[6] == 0x79.toByte() && header[7] == 0x70.toByte()) {
+                        Pair("video/mp4", "mp4")
+                    } else null
+                }
+            } catch (_: Exception) { null }
+        }
     }
 
     private fun countJpegsInThumbdataFile(file: File): Int {
@@ -432,7 +627,6 @@ class DeletedMediaScanner(private val context: Context) {
                     for (i in 0 until read) {
                         val b = buffer[i].toInt() and 0xFF
 
-                        // Detect start of JPEG: FF D8 FF
                         if (prevPrevByte == 0xFF && prevByte == 0xD8 && b == 0xFF) {
                             currentOut?.flush()
                             currentOut?.close()
@@ -451,10 +645,9 @@ class DeletedMediaScanner(private val context: Context) {
                             currentOut.write(b)
                             currentBytesWritten++
 
-                            // Detect end of JPEG: FF D9 or cap at 1MB
                             if ((prevByte == 0xFF && b == 0xD9) || currentBytesWritten > 1024 * 1024) {
                                 currentOut.flush()
-                                currentOut.close()
+                                currentOut?.close()
                                 currentOut = null
                                 if (currentCarvedFile != null && currentCarvedFile.length() > 1024) {
                                     carved.add(currentCarvedFile)
@@ -478,99 +671,6 @@ class DeletedMediaScanner(private val context: Context) {
         return carved
     }
 
-    /**
-     * Tier 5: Removable Storage (microSD FAT32/exFAT) Remnants & LOST.DIR Carving
-     */
-    private fun discoverRemovableStorageRemnants(): List<DiscoveredRecoveryItem> {
-        val results = mutableListOf<DiscoveredRecoveryItem>()
-        val externalDirs = ContextCompat.getExternalFilesDirs(context, null)
-
-        for (dir in externalDirs) {
-            if (dir != null && Environment.isExternalStorageRemovable(dir)) {
-                // Find root mount of the removable SD card (traverse up to /storage/XXXX-XXXX)
-                var sdRoot: File? = dir
-                while (sdRoot != null && sdRoot.parentFile != null && sdRoot.parentFile?.name != "storage") {
-                    sdRoot = sdRoot.parentFile
-                }
-
-                if (sdRoot != null && sdRoot.exists()) {
-                    // 1. Scan LOST.DIR on SD Card and carve media headers
-                    val lostDir = File(sdRoot, "LOST.DIR")
-                    if (lostDir.exists() && lostDir.isDirectory) {
-                        val chunks = lostDir.listFiles() ?: emptyArray()
-                        for (chunk in chunks) {
-                            if (chunk.isFile && chunk.length() > 8192) {
-                                val carvedType = carveFileMagic(chunk)
-                                if (carvedType != null) {
-                                    results.add(
-                                        DiscoveredRecoveryItem(
-                                            uri = Uri.fromFile(chunk),
-                                            displayName = "[RECOVERED_LOSTDIR] ${chunk.name}.${carvedType.second}",
-                                            sizeBytes = chunk.length(),
-                                            mimeType = carvedType.first,
-                                            provenance = PROVENANCE_LOST_DIR,
-                                            sourceDescription = "Removable SD LOST.DIR Carved ${carvedType.second.uppercase()}"
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. Scan SD Card Trash Remnants (.Trash-1000)
-                    val sdTrash = File(sdRoot, ".Trash-1000")
-                    if (sdTrash.exists() && sdTrash.isDirectory) {
-                        scanDirectoryRecursively(sdTrash, maxDepth = 2) { file ->
-                            if (file.isFile && isMediaFile(file.name)) {
-                                results.add(
-                                    DiscoveredRecoveryItem(
-                                        uri = Uri.fromFile(file),
-                                        displayName = "[RECOVERED_SDCARD] ${file.name}",
-                                        sizeBytes = file.length(),
-                                        mimeType = resolveMimeType(file.name),
-                                        provenance = PROVENANCE_REMOVABLE_SD,
-                                        sourceDescription = "Removable SD Trash (.Trash-1000)"
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return results
-    }
-
-    /**
-     * Identifies file types in raw unlinked cluster chunks (e.g. LOST.DIR) using signature magic bytes.
-     */
-    private fun carveFileMagic(file: File): Pair<String, String>? {
-        try {
-            FileInputStream(file).use { input ->
-                val header = ByteArray(16)
-                val read = input.read(header)
-                if (read < 8) return null
-
-                // JPEG magic: FF D8 FF
-                if (header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte() && header[2] == 0xFF.toByte()) {
-                    return Pair("image/jpeg", "jpg")
-                }
-                // PNG magic: 89 50 4E 47 0D 0A 1A 0A
-                if (header[0] == 0x89.toByte() && header[1] == 0x50.toByte() && header[2] == 0x4E.toByte() && header[3] == 0x47.toByte()) {
-                    return Pair("image/png", "png")
-                }
-                // MP4 / MOV box header: ftyp at offset 4
-                if (header[4] == 0x66.toByte() && header[5] == 0x74.toByte() && header[6] == 0x79.toByte() && header[7] == 0x70.toByte()) {
-                    return Pair("video/mp4", "mp4")
-                }
-            }
-        } catch (_: Exception) {}
-        return null
-    }
-
-    /**
-     * Inspects whether the device possesses root (superuser) binaries or capabilities.
-     */
     fun detectRootStatus(): Boolean {
         val suPaths = listOf(
             "/system/bin/su",
@@ -588,20 +688,34 @@ class DeletedMediaScanner(private val context: Context) {
     }
 
     /**
-     * Generates a comprehensive forensic diagnostic report with live counts and hardware telemetry.
+     * Generates a comprehensive forensic diagnostic report with live progress and dynamic vendor branding.
      */
-    suspend fun getDiagnosticReport(): RecoveryDiagnosticReport = withContext(Dispatchers.IO) {
+    suspend fun getDiagnosticReport(
+        onProgress: ((String) -> Unit)? = null
+    ): RecoveryDiagnosticReport = withContext(Dispatchers.IO) {
         val isRooted = detectRootStatus()
+        val seenPaths = HashSet<String>()
+
+        onProgress?.invoke("Auditing system MediaStore trash...")
         val trashItems = discoverMediaStoreTrash()
-        val vendorTrash = discoverVendorTrashFolders()
-        val appCaches = discoverSocialAndAppMediaCaches()
-        val thumbs = discoverThumbnailAndExifRemnants()
-        val sdRemnants = discoverRemovableStorageRemnants()
+        for (item in trashItems) seenPaths.add(item.uri.toString())
+
+        onProgress?.invoke("Inspecting ${getVendorTrashLabel()}...")
+        val vendorTrash = discoverVendorTrashFolders(seenPaths)
+
+        onProgress?.invoke("Deep storage scan: crawling app caches & thumbnails...")
+        val deepStorageItems = discoverDeepStorageAndCaches(doCarve = false, seenPaths = seenPaths, onProgress = onProgress)
+
+        onProgress?.invoke("Checking removable SD storage...")
+        val sdRemnants = discoverRemovableStorageRemnants(seenPaths)
 
         val externalDirs = ContextCompat.getExternalFilesDirs(context, null)
         val hasSdCard = externalDirs.any { it != null && Environment.isExternalStorageRemovable(it) }
 
-        val total = trashItems.size + vendorTrash.size + appCaches.size + thumbs.size + sdRemnants.size
+        val appCacheCopies = deepStorageItems.filter { it.provenance == PROVENANCE_APP_CACHE }
+        val thumbnailRemnants = deepStorageItems.filter { it.provenance == PROVENANCE_THUMBNAIL }
+
+        val total = trashItems.size + vendorTrash.size + deepStorageItems.size + sdRemnants.size
 
         RecoveryDiagnosticReport(
             androidVersion = Build.VERSION.SDK_INT,
@@ -610,17 +724,18 @@ class DeletedMediaScanner(private val context: Context) {
             supportsMediaStoreTrash = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R,
             trashedItemsFound = trashItems.size,
             vendorTrashItemsFound = vendorTrash.size,
-            appCacheCopiesFound = appCaches.size,
-            thumbnailRemnantsFound = thumbs.size,
+            appCacheCopiesFound = appCacheCopies.size,
+            thumbnailRemnantsFound = thumbnailRemnants.size,
             removableStorageFound = hasSdCard,
             removableStorageRemnantsFound = sdRemnants.size,
             totalRecoverableCount = total,
             rawFlashCarvingSupported = isRooted,
             limitationsExplanation = """
                 • File-Based Encryption (FBE): Modern Android (11-14) encrypts internal storage per-file. When unlinked and trimmed, encryption keys are wiped, rendering raw NAND blocks cryptographically unreadable.
-                • Linux Sandbox & SELinux: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted devices, our multi-tiered engine recovers all intact system trash, Samsung One UI recycle bins, WhatsApp/Telegram duplicates, EXIF header previews, and FAT32/exFAT microSD chunks.
+                • Linux Sandbox & SELinux: Unallocated sector scanning (/dev/block/*) requires Linux root UID 0 and kernel driver bypass. On unrooted devices, our multi-tiered engine recovers all intact system trash, ${getVendorTrashLabel()}, WhatsApp/Telegram duplicates, EXIF header previews, and FAT32/exFAT microSD chunks.
                 • Zero Data Loss Guarantee: Every recovered item is permanently preserved on the Windows Archive before expiration.
-            """.trimIndent()
+            """.trimIndent(),
+            vendorTrashLabel = getVendorTrashLabel()
         )
     }
 
@@ -661,6 +776,31 @@ class DeletedMediaScanner(private val context: Context) {
                 val isPermittedHidden = name.startsWith(".thumb") || name.startsWith(".trash") || name == ".recycle" || name == ".statuses"
                 if (!child.name.startsWith(".") || isPermittedHidden) {
                     scanDirectoryRecursively(child, maxDepth, currentDepth + 1, onFile)
+                }
+            }
+        }
+    }
+
+    private fun scanDirectoryRecursivelyWithDepth(
+        dir: File,
+        maxDepth: Int = 6,
+        currentDepth: Int = 0,
+        shouldSkip: (File) -> Boolean,
+        onFile: (File) -> Unit
+    ) {
+        if (currentDepth > maxDepth || !dir.exists() || !dir.isDirectory) return
+        if (shouldSkip(dir)) return
+
+        val children = dir.listFiles() ?: return
+        for (child in children) {
+            if (child.isFile) {
+                onFile(child)
+            } else if (child.isDirectory) {
+                val name = child.name.lowercase()
+                // Scan all standard directories, and permitted hidden directories (e.g. .thumbnails, .trash, .cache)
+                val isPermittedHidden = name.startsWith(".thumb") || name.startsWith(".trash") || name == ".cache" || name == ".recycle" || name == ".statuses"
+                if (!child.name.startsWith(".") || isPermittedHidden) {
+                    scanDirectoryRecursivelyWithDepth(child, maxDepth, currentDepth + 1, shouldSkip, onFile)
                 }
             }
         }

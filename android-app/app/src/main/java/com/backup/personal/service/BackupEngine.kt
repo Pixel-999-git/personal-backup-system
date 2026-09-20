@@ -184,6 +184,72 @@ class BackupEngine(private val context: Context) {
             false
         }
 
+    suspend fun stageManualFilesBatch(
+        items: List<com.backup.personal.recovery.DiscoveredRecoveryItem>,
+        onProgress: ((Int, Int) -> Unit)? = null
+    ): Int = withContext(Dispatchers.IO) {
+        val backupItems = mutableListOf<BackupItem>()
+        val total = items.size
+
+        for ((index, item) in items.withIndex()) {
+            val uri = item.uri
+            try {
+                val tempFile = File(stagingDir, "temp_${UUID.randomUUID()}.part")
+                val openStream = if (uri.scheme == "file" && uri.path != null) {
+                    FileInputStream(File(uri.path!!))
+                } else {
+                    context.contentResolver.openInputStream(uri)
+                }
+
+                var computedHash: String? = null
+                openStream?.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        val digest = MessageDigest.getInstance("SHA-256")
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            digest.update(buffer, 0, read)
+                        }
+                        computedHash = digest.digest().joinToString("") { "%02x".format(it) }
+                    }
+                }
+
+                if (computedHash != null) {
+                    val persistentStagingFile = File(stagingDir, "${computedHash}.part")
+                    if (!persistentStagingFile.exists()) {
+                        tempFile.renameTo(persistentStagingFile)
+                    } else {
+                        tempFile.delete()
+                    }
+
+                    backupItems.add(
+                        BackupItem(
+                            id = UUID.randomUUID().toString(),
+                            uriString = uri.toString(),
+                            displayName = item.displayName,
+                            mediaType = item.mimeType,
+                            sizeBytes = if (item.sizeBytes > 0) item.sizeBytes else persistentStagingFile.length(),
+                            dateTaken = System.currentTimeMillis(),
+                            sha256Hash = computedHash,
+                            stagingPath = persistentStagingFile.absolutePath,
+                            state = BackupState.QUEUED,
+                            isManualFile = true,
+                            provenance = item.provenance
+                        )
+                    )
+                }
+            } catch (_: Exception) {}
+
+            if (index % 50 == 0 || index == total - 1) {
+                onProgress?.invoke(index + 1, total)
+            }
+        }
+
+        val inserted = dbHelper.insertOrIgnoreBatch(backupItems)
+        inserted
+    }
+
     suspend fun processQueue(
         onProgress: ((item: BackupItem, transferred: Long, total: Long) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {

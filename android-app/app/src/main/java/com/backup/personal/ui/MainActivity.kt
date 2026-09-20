@@ -1151,12 +1151,16 @@ class MainActivity : ComponentActivity() {
         if (showRecoveryDialog) {
             var report by remember { mutableStateOf<com.backup.personal.recovery.RecoveryDiagnosticReport?>(null) }
             var isLoadingReport by remember { mutableStateOf(true) }
+            var scanProgressText by remember { mutableStateOf("Auditing storage & recovery sources...") }
             var recoveryStatus by remember { mutableStateOf("") }
             var isOperatingRecovery by remember { mutableStateOf(false) }
+            var queueProgressText by remember { mutableStateOf("") }
 
             LaunchedEffect(Unit) {
                 withContext(Dispatchers.IO) {
-                    val rep = recoveryScanner.getDiagnosticReport()
+                    val rep = recoveryScanner.getDiagnosticReport { progress ->
+                        scanProgressText = progress
+                    }
                     withContext(Dispatchers.Main) {
                         report = rep
                         isLoadingReport = false
@@ -1197,19 +1201,24 @@ class MainActivity : ComponentActivity() {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
+                                    .padding(vertical = 28.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
                                     CircularProgressIndicator(
                                         color = AppPalette.MintHero,
-                                        modifier = Modifier.size(32.dp)
+                                        modifier = Modifier.size(36.dp)
                                     )
-                                    Spacer(modifier = Modifier.height(10.dp))
                                     Text(
-                                        text = "Auditing storage & recovery sources...",
+                                        text = scanProgressText,
                                         fontSize = 12.sp,
-                                        color = AppPalette.TextSub
+                                        fontWeight = FontWeight.Medium,
+                                        color = AppPalette.TextSub,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        modifier = Modifier.padding(horizontal = 16.dp)
                                     )
                                 }
                             }
@@ -1247,12 +1256,12 @@ class MainActivity : ComponentActivity() {
                                 Text("${r.trashedItemsFound} items", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (r.trashedItemsFound > 0) AppPalette.MintHero else AppPalette.TextMuted)
                             }
 
-                            // Tier 2: Samsung Vendor Trash
+                            // Tier 2: Dynamic Vendor Gallery Trash (Xiaomi / Samsung / ColorOS)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text("• Samsung One UI Trash Folders", fontSize = 12.sp, color = AppPalette.TextSub)
+                                Text("• ${r.vendorTrashLabel}", fontSize = 12.sp, color = AppPalette.TextSub)
                                 Text("${r.vendorTrashItemsFound} items", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (r.vendorTrashItemsFound > 0) AppPalette.MintHero else AppPalette.TextMuted)
                             }
 
@@ -1265,7 +1274,7 @@ class MainActivity : ComponentActivity() {
                                 Text("${r.appCacheCopiesFound} items", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = if (r.appCacheCopiesFound > 0) AppPalette.MintHero else AppPalette.TextMuted)
                             }
 
-                            // Tier 4: Thumbnail Previews
+                            // Tier 4: Thumbnail & Cache Remnants
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
@@ -1315,7 +1324,7 @@ class MainActivity : ComponentActivity() {
                                     .background(AppPalette.CanvasBackground)
                                     .border(1.dp, AppPalette.CardBorder, RoundedCornerShape(10.dp))
                                     .padding(10.dp)
-                            ) {
+                                ) {
                                 Text(
                                     text = r.limitationsExplanation,
                                     fontSize = 10.sp,
@@ -1341,9 +1350,20 @@ class MainActivity : ComponentActivity() {
                         enabled = !isLoadingReport && !isOperatingRecovery && (report?.totalRecoverableCount ?: 0) > 0,
                         onClick = {
                             isOperatingRecovery = true
-                            recoveryStatus = "Extracting and queuing recoverable items..."
+                            queueProgressText = ""
+                            recoveryStatus = "Initializing recovery staging..."
                             CoroutineScope(Dispatchers.IO).launch {
-                                val queued = recoveryScanner.scanAndQueueRecoverableMedia()
+                                val queued = recoveryScanner.scanAndQueueRecoverableMedia(
+                                    onScanProgress = { text ->
+                                        CoroutineScope(Dispatchers.Main).launch { recoveryStatus = text }
+                                    },
+                                    onQueueProgress = { current, total ->
+                                        CoroutineScope(Dispatchers.Main).launch {
+                                            queueProgressText = "$current / $total"
+                                            recoveryStatus = "Archiving recovered items ($current / $total)..."
+                                        }
+                                    }
+                                )
                                 withContext(Dispatchers.Main) {
                                     isOperatingRecovery = false
                                     recoveryStatus = "Successfully queued $queued items for Windows archival!"
@@ -1360,7 +1380,11 @@ class MainActivity : ComponentActivity() {
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Text(
-                            text = if (isOperatingRecovery) "Queuing..." else "Queue & Archive (${report?.totalRecoverableCount ?: 0})",
+                            text = if (isOperatingRecovery) {
+                                if (queueProgressText.isNotEmpty()) "Archiving ($queueProgressText)" else "Archiving..."
+                            } else {
+                                "Queue & Archive (${report?.totalRecoverableCount ?: 0})"
+                            },
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )

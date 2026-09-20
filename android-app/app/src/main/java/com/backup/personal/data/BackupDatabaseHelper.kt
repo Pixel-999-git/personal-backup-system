@@ -121,6 +121,49 @@ class BackupDatabaseHelper(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    fun insertOrIgnoreBatch(items: List<BackupItem>): Int {
+        val db = writableDatabase
+        var inserted = 0
+        db.beginTransaction()
+        try {
+            for (item in items) {
+                var exists = false
+                db.rawQuery("SELECT $COL_ID FROM $TABLE_ITEMS WHERE $COL_HASH = ? LIMIT 1", arrayOf(item.sha256Hash)).use { cursor ->
+                    exists = cursor.moveToFirst()
+                }
+                if (!exists) {
+                    val values = ContentValues().apply {
+                        put(COL_ID, item.id)
+                        put(COL_URI, item.uriString)
+                        put(COL_NAME, item.displayName)
+                        put(COL_TYPE, item.mediaType)
+                        put(COL_SIZE, item.sizeBytes)
+                        put(COL_DATE_TAKEN, item.dateTaken)
+                        put(COL_HASH, item.sha256Hash)
+                        put(COL_STAGING_PATH, item.stagingPath)
+                        put(COL_STATE, item.state.name)
+                        put(COL_TRANSFERRED, item.bytesTransferred)
+                        put(COL_RETRIES, item.retryCount)
+                        put(COL_ERROR, item.lastError)
+                        put(COL_CREATED_AT, item.createdAt)
+                        put(COL_VERIFIED_AT, item.verifiedAt)
+                        put(COL_RETENTION_EXPIRES, item.retentionExpiresAt)
+                        put(COL_IS_MANUAL, if (item.isManualFile) 1 else 0)
+                        put(COL_PROVENANCE, item.provenance)
+                    }
+                    if (db.insertWithOnConflict(TABLE_ITEMS, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L) {
+                        inserted++
+                    }
+                }
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return inserted
+    }
+
+    @Synchronized
     fun updateState(
         id: String,
         state: BackupState,
