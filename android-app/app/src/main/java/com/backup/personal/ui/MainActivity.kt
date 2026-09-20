@@ -242,7 +242,9 @@ class MainActivity : ComponentActivity() {
                     val health = apiClient.checkHealth(prefs.serverHost, prefs.serverPort)
                     serverConnected = health != null
                     serverFreeSpace = if (health != null) {
-                        "${health.freeSpaceBytes / (1024 * 1024 * 1024)} GB free"
+                        val freeGb = health.freeSpaceBytes / (1024 * 1024 * 1024)
+                        val cappedGb = if (freeGb > 30) 30 else freeGb
+                        "$cappedGb GB free on Cloud"
                     } else "Offline"
 
                     val stats = dbHelper.getStats()
@@ -501,7 +503,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             Text(
-                                text = "Personal Backup needs Photos, Videos & Notification access to continuously safeguard your memories to your Windows PC without data loss.",
+                                text = "Personal Backup needs Photos, Videos & Notification access to continuously safeguard your memories to your Cloud Storage without data loss.",
                                 fontSize = 12.sp,
                                 color = AppPalette.TextSub,
                                 lineHeight = 16.sp
@@ -570,7 +572,7 @@ class MainActivity : ComponentActivity() {
                                 Spacer(modifier = Modifier.height(2.dp))
                                 // IP address hidden from main screen for clean privacy
                                 Text(
-                                    text = if (serverConnected) "Private Archive • $serverFreeSpace" else "Private Storage • Tap to connect",
+                                    text = if (serverConnected) "Private Archive • $serverFreeSpace" else "Private Cloud Storage • Tap to connect",
                                     fontSize = 12.sp,
                                     color = AppPalette.TextSub
                                 )
@@ -675,7 +677,7 @@ class MainActivity : ComponentActivity() {
                                 color = AppPalette.MintHero
                             )
                             Text(
-                                text = "Safe on laptop",
+                                text = "Safe on Cloud",
                                 fontSize = 11.sp,
                                 color = AppPalette.TextSub
                             )
@@ -751,7 +753,7 @@ class MainActivity : ComponentActivity() {
                             CoroutineScope(Dispatchers.Default).launch {
                                 val newFound = engine.scanMediaStore()
                                 withContext(Dispatchers.Main) {
-                                    currentStatusText = "Uploading $newFound items to Windows Archive..."
+                                    currentStatusText = "Uploading $newFound items to Cloud Storage..."
                                 }
                                 engine.processQueue { item, transferred, total ->
                                     val pct = if (total > 0) transferred.toFloat() / total.toFloat() else 0f
@@ -764,7 +766,7 @@ class MainActivity : ComponentActivity() {
                                 withContext(Dispatchers.Main) {
                                     isOperating = false
                                     currentProgress = 1.0f
-                                    currentStatusText = "Complete. Verified with Windows archive."
+                                    currentStatusText = "Complete. Verified with Cloud Archive."
                                 }
                             }
                         },
@@ -787,7 +789,7 @@ class MainActivity : ComponentActivity() {
                         .border(1.dp, AppPalette.BlushBorder, RoundedCornerShape(16.dp))
                         .clickable(enabled = !isOperating) {
                             isOperating = true
-                            currentStatusText = "Querying Windows archive for files to restore..."
+                            currentStatusText = "Querying Cloud Archive for files to restore..."
                             CoroutineScope(Dispatchers.Default).launch {
                                 val (restored, skipped) = restoreEngine.restoreAllFromArchive { current, total, name ->
                                     val pct = if (total > 0) current.toFloat() / total.toFloat() else 0f
@@ -1366,7 +1368,7 @@ class MainActivity : ComponentActivity() {
                                 )
                                 withContext(Dispatchers.Main) {
                                     isOperatingRecovery = false
-                                    recoveryStatus = "Successfully queued $queued items for Windows archival!"
+                                    recoveryStatus = "Successfully queued $queued items for Cloud archival!"
                                     Toast.makeText(
                                         this@MainActivity,
                                         "Queued $queued recovered items into archive pipeline!",

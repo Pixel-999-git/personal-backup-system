@@ -94,12 +94,16 @@ class BackupServer {
       if (method === 'GET' && pathname === '/api/v1/health') {
         const freeSpace = this.archive.checkFreeSpace();
         const stats = this.db.getStats();
+        const capGb = this.config.maxStorageCapGb || 30;
+        const maxStorageBytes = capGb * 1024 * 1024 * 1024;
+        const usedBytes = stats.totalBytes || 0;
+        const reportedFree = Math.max(0, Math.min(freeSpace, maxStorageBytes - usedBytes));
         return sendJson(res, 200, {
           status: 'RUNNING',
           serviceVersion: '1.0.0',
-          archiveName: 'Samsung Galaxy A05s Backup',
+          archiveName: 'Samsung Galaxy A05s Cloud Backup',
           archiveDir: this.archive.rootDir,
-          freeSpaceBytes: freeSpace,
+          freeSpaceBytes: reportedFree,
           totalFiles: stats.totalFiles,
           totalBytesArchived: stats.totalBytes,
           isHealthy: freeSpace >= this.config.minFreeSpaceBytes,

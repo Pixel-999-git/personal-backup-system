@@ -8,5 +8,6 @@
   "serverToken": "22a14976-7469-4906-b46f-8c7b15e18e5f",
   "archiveId": "c1bf6425-d498-4616-84cc-3375a34d30c1",
   "recoveryKey": "RCV-LCAL-E57X-2ZCE-M29A",
-  "recoveryKeyHash": "d5b6fb410f370e486678bebe74ecc7306703225df7326f23d799e06b6f502569"
+  "recoveryKeyHash": "d5b6fb410f370e486678bebe74ecc7306703225df7326f23d799e06b6f502569",
+  "maxStorageCapGb": 30
 }
