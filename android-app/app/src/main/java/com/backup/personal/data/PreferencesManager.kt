@@ -47,4 +47,8 @@ class PreferencesManager(context: Context) {
     var lastReconciliationTime: Long
         get() = prefs.getLong("last_reconciliation_time", 0L)
         set(value) = prefs.edit().putLong("last_reconciliation_time", value).apply()
+
+    var hasRequestedInitialPermissions: Boolean
+        get() = prefs.getBoolean("has_requested_initial_permissions", false)
+        set(value) = prefs.edit().putBoolean("has_requested_initial_permissions", value).apply()
 }

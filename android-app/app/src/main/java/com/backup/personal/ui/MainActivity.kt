@@ -125,7 +125,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestRequiredPermissions() {
+    private fun getMissingPermissions(): List<String> {
         val permissions = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
@@ -138,12 +138,17 @@ class MainActivity : ComponentActivity() {
             permissions.add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
         }
 
-        val ungranted = permissions.filter {
+        return permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    private fun requestRequiredPermissions() {
+        val ungranted = getMissingPermissions()
         if (ungranted.isNotEmpty()) {
             permissionsLauncher.launch(ungranted.toTypedArray())
         }
+        prefs.hasRequestedInitialPermissions = true
     }
 
     private fun handleManualFileSelection(uri: Uri) {
@@ -189,6 +194,7 @@ class MainActivity : ComponentActivity() {
         var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
         var isDownloadingUpdate by remember { mutableStateOf(false) }
         var updateDownloadProgress by remember { mutableStateOf(0f) }
+        var missingPermissionsCount by remember { mutableStateOf(getMissingPermissions().size) }
 
         // Check for updates on startup
         LaunchedEffect(Unit) {
@@ -264,12 +270,31 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "Personal Backup",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = AppPalette.TextMain
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF1E2923)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clip(CircleShape)
+                                        .background(AppPalette.MintHero)
+                                )
+                            }
+                            Text(
+                                text = "Personal Backup",
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppPalette.TextMain
+                            )
+                        }
                     }
 
                     // Setup button styled as a clean modern pill
@@ -388,6 +413,75 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Text("Download & Install v${info.latestVersion}", fontWeight = FontWeight.Bold, color = Color.White)
                                 }
+                            }
+                        }
+                    }
+                }
+
+                // 0.5 Permission Setup Banner (Displays on first install or whenever essential permissions are ungranted)
+                if (missingPermissionsCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(AppPalette.BlushSurface)
+                            .border(1.dp, AppPalette.BlushBorder, RoundedCornerShape(16.dp))
+                            .padding(16.dp)
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(AppPalette.BlushHero)
+                                    )
+                                    Text(
+                                        text = "Initial Setup: Permissions Required",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 14.sp,
+                                        color = AppPalette.BlushText
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(AppPalette.CardBackground)
+                                        .border(1.dp, AppPalette.BlushBorder, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "$missingPermissionsCount needed",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = AppPalette.BlushText
+                                    )
+                                }
+                            }
+                            Text(
+                                text = "Personal Backup needs Photos, Videos & Notification access to continuously safeguard your memories to your Windows PC without data loss.",
+                                fontSize = 12.sp,
+                                color = AppPalette.TextSub,
+                                lineHeight = 16.sp
+                            )
+                            Button(
+                                onClick = {
+                                    requestRequiredPermissions()
+                                    missingPermissionsCount = getMissingPermissions().size
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = AppPalette.BlushHero),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth().height(42.dp)
+                            ) {
+                                Text("Grant All Required Permissions", fontWeight = FontWeight.Bold, color = Color.White)
                             }
                         }
                     }
